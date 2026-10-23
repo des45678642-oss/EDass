@@ -1,6 +1,6 @@
 -- 檔案路徑：sdapi.lua
--- 所有參數(檔案路徑、資料庫元件…)直接讀取主程式 touch_menu，不再用傳遞的方式。
-local fs = require("filesystem")
+-- 時間相關函式。參數(檔案路徑…)直接讀取主程式 touch_menu，不再用傳遞的方式。
+-- 設定檔載入 load_hybrid_config 已移到 sdlogic.lua。
 local io = require("io")
 local computer = require("computer")
 local internet = require("internet")
@@ -9,53 +9,6 @@ local api = {}
 
 -- 延遲載入主程式，避免與 touch_menu 載入時互相 require 造成循環
 local function main() return require("touch_menu") end
-
-function api.load_hybrid_config()
-    local m = main()
-    local path, db_comp = m.config_file_path, m.db
-    local items = {}
-    local fluids = {}
-    if not fs.exists(path) or not db_comp then return {}, {} end
-    local current_section = nil
-    for line in io.lines(path) do
-        line = line:gsub("[%c]", "")
-        if line ~= "" and not line:match("^#") then
-            if line:lower():match("%[items%]") then
-                current_section = "items"
-            elseif line:lower():match("%[fluids%]") then
-                current_section = "fluids"
-            elseif not line:match("^target_database") and not line:match("^%[settings%]") then
-                if current_section == "items" then
-                    local slot_s, min_s, req_s, cd_s, prio_s = line:match("^(%d+)=?(%d*)=?(%d*)=?(%d*)=?(%d*)$")
-                    if slot_s then
-                        local slot = tonumber(slot_s) or 0
-                        local min_stock = tonumber(min_s) or 0
-                        local req_qty = tonumber(req_s) or 0
-                        -- 留空時保持 nil，讓呼叫端套用全域預設冷卻 (default_cooldown)
-                        local cooldown = tonumber(cd_s)
-                        local priority = tonumber(prio_s) or 9
-                        if slot > 0 then
-                            local db_success, item_data = pcall(db_comp.get, slot)
-                            if db_success and item_data and item_data.label then
-                                items[#items + 1] = {
-                                    name = item_data.label,
-                                    min_stock = min_stock,
-                                    req_qty = req_qty,
-                                    cooldown = cooldown,
-                                    priority = priority
-                                }
-                            end
-                        end
-                    end
-                elseif current_section == "fluids" then
-                    local fluid_name = line:gsub("^%s*(.-)%s*$", "%1")
-                    fluids[#fluids + 1] = fluid_name
-                end
-            end
-        end
-    end
-    return items, fluids
-end
 
 function api.update_time()
     local MY_SERVER_URL = "http://192.168.212.103:8080"

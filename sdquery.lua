@@ -12,6 +12,7 @@
 --   "AE_QUERY_DONE",  請求編號, 查詢的格子總數
 local component = require("component")
 local event = require("event")
+local sdlogic = require("sdlogic")
 
 local sdquery = {}
 
@@ -21,30 +22,16 @@ local function main() return require("touch_menu") end
 local MAX_SLOTS = 60
 local listener = nil
 
--- 以物品名稱統計 AE2 網路內的總數量
-function sdquery.count_for_label(label)
-    local m = main()
-    if not m.ae then return nil, "找不到 ME 控制器/介面" end
-    local ok, items = pcall(m.ae.getItemsInNetwork, { label = label })
-    if not ok or type(items) ~= "table" then
-        ok, items = pcall(m.ae.getItemsInNetwork)
-        if not ok or type(items) ~= "table" then return nil, "AE2 查詢失敗" end
-    end
-    local total = 0
-    for _, item in ipairs(items) do
-        if item.label == label then total = total + (item.size or 0) end
-    end
-    return total
-end
-
 -- 查詢單一 database 格子，回傳 label, count 或 nil, 錯誤訊息
+-- (資料庫與 AE2 計數都與第二頁共用 sdlogic 的實作，數字一定一致)
 function sdquery.query_slot(slot)
     local m = main()
-    if not m.db then return nil, "找不到 database 組件" end
-    local ok, stack = pcall(m.db.get, slot)
+    local db = sdlogic.get_database()
+    if not db then return nil, "找不到 database 組件" end
+    local ok, stack = pcall(db.get, slot)
     if not ok then return nil, "格子編號無效" end
-    if not stack or not stack.label then return nil, "database 該格子是空的" end
-    local count, err = sdquery.count_for_label(stack.label)
+    if type(stack) ~= "table" or not stack.label then return nil, "database 該格子是空的" end
+    local count, err = sdlogic.count_item({ name = stack.name, damage = stack.damage, label = stack.label }, m.ae)
     if not count then return nil, err end
     return stack.label, count
 end

@@ -25,7 +25,7 @@ local time_delay              = 300
 local time_counter = time_delay 
 
 -- 檔案路徑配置
-local config_file_path        = "/mnt/4c8/ae_config.txt"
+local config_file_path        = "/mnt/4c8/ae_config.json"
 local log_file_path           = "/mnt/4c8/ae_log.txt"
 local realtime_path           = "/mnt/4c8/realtime.txt"
 
@@ -91,8 +91,8 @@ if component.isAvailable("database") then db = component.database end
 local SCR_W, SCR_H = 160, 50
 
 local ae = nil
-if component.isAvailable("me_controller") then ae = component.me_controller
-elseif component.isAvailable("me_interface") then ae = component.me_interface end
+if component.isAvailable("me_interface") then ae = component.me_interface
+elseif component.isAvailable("me_controller") then ae = component.me_controller end
 
 local function get_now_time()
     return computer.uptime()

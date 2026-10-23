@@ -9,7 +9,7 @@ local function test(name, fn)
     _G.current_global_task = nil
     Main = {
         realtime_path = TMP_DIR .. "/realtime.txt",
-        config_file_path = TMP_DIR .. "/ae_config.txt",
+        config_file_path = TMP_DIR .. "/ae_config.json",
         log_file_path = TMP_DIR .. "/ae_log.txt",
         default_cooldown = 600, SCR_W = 160, SCR_H = 50,
         items_per_page = 35, list_page = 1, list_pages = 1,
@@ -21,6 +21,7 @@ local function test(name, fn)
     Main.get_now_time = function() return Main.now end
     Main.draw_pager = function() Main.pager_draws = Main.pager_draws + 1 end
     package.loaded.touch_menu = Main
+    if package.loaded.sdlogic and package.loaded.sdlogic._reset_config_cache then package.loaded.sdlogic._reset_config_cache() end
     local ok, err = pcall(fn)
     if ok then passed = passed + 1; print("PASS  " .. name)
     else failed = failed + 1; print("FAIL  " .. name .. "\n      " .. tostring(err)) end
@@ -55,7 +56,11 @@ component.proxy = function(addr) return { address = addr } end
 
 package.loaded.component = component
 package.loaded.computer = { uptime = function() return uptime end }
-package.loaded.filesystem = { exists = function(p) local f = io.open(p, "r"); if f then f:close(); return true end return false end }
+local mtimes = {}
+package.loaded.filesystem = {
+    exists = function(p) local f = io.open(p, "r"); if f then f:close(); return true end return false end,
+    lastModified = function(p) return mtimes[p] end,
+}
 package.loaded.internet = { request = function() error("no network in tests") end }
 local listeners = {}
 package.loaded.event = {
@@ -68,8 +73,13 @@ package.loaded.thread = { create = function(fn) return { kill = function() end }
 
 local sdapi = require("sdapi")
 local sdlogic = require("sdlogic")
+local sdjson = require("sdjson")
 
-local function write(path, text) local f = assert(io.open(path, "w")); f:write(text); f:close() end
+local function write(path, text)
+    local f = assert(io.open(path, "w")); f:write(text); f:close()
+    mtimes[path] = (mtimes[path] or 0) + 1
+end
+local function cfg(json_text) write(TMP_DIR .. "/ae_config.json", json_text) end
 local function read(path) local f = assert(io.open(path, "r")); local t = f:read("a"); f:close(); return t end
 
 local function make_gpu()
@@ -106,28 +116,152 @@ end
 local function render(ctx, now) ctx.now = now; sdlogic.render_page2() end
 local function load_cfg(path, db) Main.config_file_path = path; Main.db = db; return sdapi.load_hybrid_config() end
 
--- ========== sdapi: config parsing ==========
-test("config: empty cooldown stays nil so default_cooldown can apply", function()
-    write(TMP_DIR .. "/c.txt", "[items]\n1=100=10\n")
-    local items = load_cfg(TMP_DIR .. "/c.txt", make_db({ [1] = { label = "Iron" } }))
-    eq(#items, 1); eq(items[1].name, "Iron"); eq(items[1].min_stock, 100); eq(items[1].req_qty, 10)
-    eq(items[1].cooldown, nil, "cooldown"); eq(items[1].priority, 9)
+-- ========== sdjson ==========
+test("json: scalars, nesting, escapes, unicode, BOM", function()
+    local v = assert(sdjson.decode('\239\187\191{"a":[1,2.5,-3e2,true,false,null],"s":"x\\n\\"\\u9435\\ud83d\\ude00","o":{}}'))
+    eq(v.a[1], 1); eq(v.a[2], 2.5); eq(v.a[3], -300); eq(v.a[4], true); eq(v.a[5], false); eq(v.a[6], sdjson.null)
+    eq(v.s, 'x\n"鐵😀'); eq(next(v.o), nil)
 end)
 
-test("config: special mode fields (circuit=cooldown field, priority)", function()
-    write(TMP_DIR .. "/c.txt", "[items]\n4=500=0=2=1\n")
-    local items = load_cfg(TMP_DIR .. "/c.txt", make_db({ [4] = { label = "Clone A" } }))
-    eq(items[1].cooldown, 2); eq(items[1].priority, 1); eq(items[1].req_qty, 0)
+test("json: malformed input returns nil + position, never throws", function()
+    local bad = { '', '{', '{"a":}', '{"a":1,}', '[1 2]', '{"a":1} x', '"abc', '{"a":01}', '{a:1}', '[1,]', '{"a":"\\q"}', '{"a":"\\ud800"}', 'nul', '"a\nb"' }
+    for _, text in ipairs(bad) do
+        local v, err = sdjson.decode(text)
+        eq(v, nil, "should reject: " .. text)
+        truthy(type(err) == "string" and err ~= "", "error message for: " .. text)
+    end
+    local _, err = sdjson.decode('{\n  "a": ,\n}')
+    truthy(err:find("行 2", 1, true), "reports the line: " .. err)
+    eq((sdjson.decode(nil)), nil)
 end)
 
-test("config: skips comments, unknown slots and missing db; parses fluids", function()
-    write(TMP_DIR .. "/c.txt", "# note\n[settings]\ntarget_database=x\n[items]\n1=5=5\n9=5=5\n[fluids]\n  water  \n")
-    local items, fluids = load_cfg(TMP_DIR .. "/c.txt", make_db({ [1] = { label = "Iron" } }))
-    eq(#items, 1); eq(#fluids, 1); eq(fluids[1], "water")
-    local a, b = load_cfg(TMP_DIR .. "/c.txt", nil)
-    eq(#a, 0); eq(#b, 0)
-    local c = load_cfg(TMP_DIR .. "/nope.txt", make_db({}))
-    eq(#c, 0)
+test("json: deep nesting is rejected instead of overflowing the stack", function()
+    local v, err = sdjson.decode(string.rep("[", 500) .. string.rep("]", 500))
+    eq(v, nil); truthy(err)
+end)
+
+-- ========== sdlogic: config loading (JSON) ==========
+local function sample_db()
+    return make_db({
+        [1] = { name = "minecraft:iron_ingot", damage = 0, label = "Iron" },
+        [2] = { name = "mod:ingot", damage = 5, label = "鐵錠" },
+        [4] = { name = "mod:a", damage = 0, label = "Clone A" },
+        [5] = { name = "mod:b", damage = 0, label = "Clone B" },
+    })
+end
+
+test("config: fields resolved from database.get; blank cooldown stays nil", function()
+    cfg('{"items":[{"slot":1,"mode_tag":"restock","target_quantity":100,"target_once":10}]}')
+    Main.db = sample_db()
+    local items, errs = sdlogic.load_hybrid_config()
+    eq(#errs, 0); eq(#items, 1)
+    local it = items[1]
+    eq(it.slot, 1); eq(it.name, "minecraft:iron_ingot"); eq(it.damage, 0); eq(it.label, "Iron")
+    eq(it.target_quantity, 100); eq(it.target_once, 10); eq(it.cooldown, nil); eq(it.mode_tag, "restock")
+end)
+
+test("config: clone mode needs circuit; priority defaults to 9", function()
+    cfg('{"items":[{"slot":4,"mode_tag":"clone","target_quantity":500,"circuit":2,"priority":1},{"slot":5,"mode_tag":"clone","target_quantity":5,"circuit":24}]}')
+    Main.db = sample_db()
+    local items, errs = sdlogic.load_hybrid_config()
+    eq(#errs, 0)
+    eq(items[1].circuit, 2); eq(items[1].priority, 1); eq(items[1].target_once, 0)
+    eq(items[2].priority, 9)
+end)
+
+test("config: bad entries are skipped with an error, good ones still load", function()
+    cfg([[{"items":[
+        {"slot":1,"mode_tag":"restock","target_quantity":100,"target_once":10},
+        {"slot":"x","mode_tag":"restock"},
+        {"slot":2,"mode_tag":"bogus","target_quantity":1},
+        {"slot":2,"mode_tag":"restock","target_quantity":1},
+        {"slot":2,"mode_tag":"restock","target_quantity":-5,"target_once":1},
+        {"slot":2,"mode_tag":"restock","target_quantity":5,"target_once":1,"cooldown":"fast"},
+        {"slot":4,"mode_tag":"clone","target_quantity":5},
+        {"slot":4,"mode_tag":"clone","target_quantity":5,"circuit":99},
+        {"slot":5,"mode_tag":"clone","target_quantity":5,"circuit":1,"priority":12},
+        {"slot":77,"mode_tag":"monitor"},
+        7, null,
+        {"slot":2,"mode_tag":"monitor"}
+    ]}]])
+    Main.db = sample_db()
+    local items, errs = sdlogic.load_hybrid_config()
+    eq(#items, 2); eq(items[1].label, "Iron"); eq(items[2].label, "鐵錠")
+    eq(#errs, 11)
+    for _, e in ipairs(errs) do truthy(type(e) == "string" and e ~= "") end
+end)
+
+test("config: missing file / invalid JSON / no database / wrong shape are reported, not thrown", function()
+    Main.db = sample_db()
+    Main.config_file_path = TMP_DIR .. "/nope.json"
+    local items, errs = sdlogic.load_hybrid_config(); eq(#items, 0); eq(#errs, 1)
+    Main.config_file_path = TMP_DIR .. "/ae_config.json"
+    cfg('{"items": [ oops ]}')
+    items, errs = sdlogic.load_hybrid_config(); eq(#items, 0); truthy(errs[1]:find("JSON", 1, true))
+    cfg('[1,2]')
+    items, errs = sdlogic.load_hybrid_config(); eq(#items, 0); truthy(errs[1]:find("items", 1, true))
+    cfg('{"items":[{"slot":1,"mode_tag":"monitor"}]}')
+    Main.db = nil
+    items, errs = sdlogic.load_hybrid_config(); eq(#items, 0); truthy(errs[1]:find("database", 1, true))
+end)
+
+test("config: file that goes bad keeps the last good config (and says so)", function()
+    Main.db = sample_db()
+    cfg('{"items":[{"slot":1,"mode_tag":"monitor"}]}')
+    local items = sdlogic.load_hybrid_config(); eq(#items, 1)
+    cfg('{"items":[{"slot":1,')                     -- half-saved file
+    local items2, errs = sdlogic.load_hybrid_config()
+    eq(#items2, 1, "last good config kept"); eq(#errs, 1)
+end)
+
+test("config: unchanged file is not re-parsed (lastModified cache)", function()
+    Main.db = sample_db()
+    cfg('{"items":[{"slot":1,"mode_tag":"monitor"}]}')
+    eq(#sdlogic.load_hybrid_config(), 1)
+    local f = assert(io.open(Main.config_file_path, "w")); f:write('{"items":[]}'); f:close()  -- no mtime bump
+    eq(#sdlogic.load_hybrid_config(), 1, "cached")
+    cfg('{"items":[]}')
+    eq(#sdlogic.load_hybrid_config(), 0, "re-read after mtime change")
+end)
+
+test("config: database slot emptied after config load -> error entry, others fine", function()
+    cfg('{"items":[{"slot":1,"mode_tag":"monitor"},{"slot":2,"mode_tag":"monitor"}]}')
+    Main.db = sample_db()
+    eq(#sdlogic.load_hybrid_config(), 2)
+    Main.db = make_db({ [1] = { name = "x", damage = 0, label = "Iron" } })
+    local items, errs = sdlogic.load_hybrid_config()
+    eq(#items, 1); eq(#errs, 1); truthy(errs[1]:find("2", 1, true))
+end)
+
+test("config: json 'database' address prefix selects the database component", function()
+    avail.database = nil
+    local special = make_db({ [1] = { name = "n", damage = 0, label = "FromSpecial" } })
+    listings = { ["9ee0-db"] = "database" }
+    local saved = component.proxy
+    component.proxy = function(addr) if addr == "9ee0-db" then return special end return { address = addr } end
+    cfg('{"database":"9EE0","items":[{"slot":1,"mode_tag":"monitor"}]}')
+    Main.db = sample_db()
+    local items = sdlogic.load_hybrid_config()
+    eq(items[1].label, "FromSpecial")
+    cfg('{"database":"zzzz","items":[{"slot":1,"mode_tag":"monitor"}]}')
+    items = sdlogic.load_hybrid_config()
+    eq(items[1].label, "Iron", "unknown prefix falls back to the main program's db")
+    component.proxy = saved; listings = {}
+end)
+
+test("count_item: filtered query; name+damage guard against label collisions", function()
+    local seen
+    local ae = { getItemsInNetwork = function(filter) seen = filter; return {
+        { label = "Iron", name = "minecraft:iron_ingot", damage = 0, size = 100 },
+        { label = "Iron", name = "other:iron_ingot", damage = 0, size = 50 },
+        { label = "Iron", name = "minecraft:iron_ingot", damage = 3, size = 7 },
+        { label = "Iron", name = "minecraft:iron_ingot", damage = 0, size = 23 },
+    } end }
+    local n = sdlogic.count_item({ name = "minecraft:iron_ingot", damage = 0, label = "Iron" }, ae)
+    eq(n, 123); eq(seen.label, "Iron")
+    local nothing, err = sdlogic.count_item({ label = "Iron" }, { getItemsInNetwork = function() error("boom") end })
+    eq(nothing, nil); truthy(err)
+    eq((sdlogic.count_item({ label = "Iron" }, nil)), nil)
 end)
 
 -- ========== sdapi: clock ==========
@@ -206,25 +340,25 @@ end)
 test("stale lock: holder removed from config -> released + STOP_CLONE", function()
     broadcasts = {}
     _G.current_global_task = "Removed"
-    sdlogic.release_stale_lock({ { name = "Clone A", min_stock = 10, req_qty = 0 } })
+    sdlogic.release_stale_lock({ { label = "Clone A", mode_tag = "clone" } })
     eq(_G.current_global_task, nil); eq(broadcasts[1][2], "STOP_CLONE")
 end)
 
 test("stale lock: holder switched to normal restock mode -> released", function()
     _G.current_global_task = "Clone A"
-    sdlogic.release_stale_lock({ { name = "Clone A", min_stock = 10, req_qty = 5 } })
+    sdlogic.release_stale_lock({ { label = "Clone A", mode_tag = "restock" } })
     eq(_G.current_global_task, nil)
 end)
 
 test("lock kept while holder is still a special-mode item", function()
     broadcasts = {}
     _G.current_global_task = "Clone A"
-    sdlogic.release_stale_lock({ { name = "Clone A", min_stock = 10, req_qty = 0 } })
+    sdlogic.release_stale_lock({ { label = "Clone A", mode_tag = "clone" } })
     eq(_G.current_global_task, "Clone A"); eq(#broadcasts, 0)
 end)
 
 test("render_page2 with empty config releases a held lock", function()
-    write(TMP_DIR .. "/ae_config.txt", "[items]\n")
+    cfg('{"items":[]}')
     _G.current_global_task = "Clone A"
     local ctx = make_ctx()
     render(ctx, 10)
@@ -233,7 +367,7 @@ end)
 
 test("priority pre-emption: lower number wins the lock; satisfied item unlocks", function()
     broadcasts = {}
-    write(TMP_DIR .. "/ae_config.txt", "[items]\n4=500=0=2=5\n5=500=0=3=1\n")
+    cfg('{"items":[{"slot":4,"mode_tag":"clone","target_quantity":500,"circuit":2,"priority":5},{"slot":5,"mode_tag":"clone","target_quantity":500,"circuit":3,"priority":1}]}')
     local ctx = make_ctx()
     render(ctx, 10)
     eq(_G.current_global_task, "Clone B", "high-priority item should hold the lock")
@@ -249,7 +383,7 @@ end)
 
 -- ========== sdlogic: restock logic ==========
 test("default cooldown (600s) is applied when config leaves it blank", function()
-    write(TMP_DIR .. "/ae_config.txt", "[items]\n1=100=10\n")
+    cfg('{"items":[{"slot":1,"mode_tag":"restock","target_quantity":100,"target_once":10}]}')
     local ctx = make_ctx()
     ctx.last_order_time["Iron"] = 100
     render(ctx, 110)  -- 10s after the last order
@@ -260,7 +394,7 @@ test("default cooldown (600s) is applied when config leaves it blank", function(
 end)
 
 test("restock places an order when cooldown elapsed and stock is low", function()
-    write(TMP_DIR .. "/ae_config.txt", "[items]\n1=100=10\n")
+    cfg('{"items":[{"slot":1,"mode_tag":"restock","target_quantity":100,"target_once":10}]}')
     local ctx = make_ctx()
     local requested
     ctx.ae.getCraftables = function() return { { request = function(n) requested = n; return { isDone = function() return false end, isCanceled = function() return false end } end } } end
@@ -270,8 +404,8 @@ test("restock places an order when cooldown elapsed and stock is low", function(
     truthy(read(ctx.log_file_path):find("Iron=1=0=0", 1, true))
 end)
 
-test("no order when stock >= min_stock", function()
-    write(TMP_DIR .. "/ae_config.txt", "[items]\n1=100=10\n")
+test("no order when stock >= target_quantity", function()
+    cfg('{"items":[{"slot":1,"mode_tag":"restock","target_quantity":100,"target_once":10}]}')
     local ctx = make_ctx()
     ctx.ae.getItemsInNetwork = function() return { { label = "Iron", size = 500 } } end
     local called = false
@@ -280,18 +414,59 @@ test("no order when stock >= min_stock", function()
     eq(called, false)
 end)
 
+test("AE query failure is NOT treated as 0 stock (no order, error status, log tag 7)", function()
+    cfg('{"items":[{"slot":1,"mode_tag":"restock","target_quantity":100,"target_once":10}]}')
+    local ctx = make_ctx()
+    ctx.ae.getItemsInNetwork = function() error("ae offline") end
+    local ordered = false
+    ctx.ae.getCraftables = function() ordered = true; return {} end
+    render(ctx, 5000)
+    eq(ordered, false)
+    truthy(row_text(ctx.gpu, 16):find("AE查詢失敗", 1, true))
+    truthy(read(ctx.log_file_path):find("Iron=7=0=0", 1, true))
+end)
+
+test("monitor mode never orders and never takes the clone lock", function()
+    cfg('{"items":[{"slot":1,"mode_tag":"monitor"}]}')
+    local ctx = make_ctx()
+    local called = false
+    ctx.ae.getCraftables = function() called = true; return {} end
+    render(ctx, 5000)
+    eq(called, false); eq(_G.current_global_task, nil)
+    truthy(read(ctx.log_file_path):find("Iron=0=0=0", 1, true))
+end)
+
+test("config errors are shown on row 12 and the valid items still render", function()
+    cfg('{"items":[{"slot":1,"mode_tag":"monitor"},{"slot":"bad","mode_tag":"monitor"}]}')
+    local ctx = make_ctx()
+    render(ctx, 5000)
+    local msg
+    for _, st in ipairs(ctx.gpu.sets) do if st.y == 12 and st.s:find("slot", 1, true) then msg = st.s end end
+    truthy(msg, "error line on row 12")
+    truthy(row_text(ctx.gpu, 16):find("Iron", 1, true))
+end)
+
+test("restock mode only takes the clone path when mode_tag is clone", function()
+    cfg('{"items":[{"slot":4,"mode_tag":"restock","target_quantity":100,"target_once":10}]}')
+    local ctx = make_ctx()
+    render(ctx, 5000)
+    eq(_G.current_global_task, nil)
+end)
+
 test("render rows stay on screen (no writes below SCR_H)", function()
-    local lines = { "[items]" }
-    local slots = {}
-    for i = 1, 60 do lines[#lines + 1] = i .. "=1=1"; slots[i] = { label = "Item" .. i } end
-    write(TMP_DIR .. "/ae_config.txt", table.concat(lines, "\n") .. "\n")
+    local rows, slots = {}, {}
+    for i = 1, 60 do
+        rows[#rows + 1] = '{"slot":' .. i .. ',"mode_tag":"restock","target_quantity":1,"target_once":1}'
+        slots[i] = { label = "Item" .. i }
+    end
+    cfg('{"items":[' .. table.concat(rows, ",") .. ']}')
     local ctx = make_ctx({ db = make_db(slots) })
     render(ctx, 5000)
     for _, s in ipairs(ctx.gpu.sets) do truthy(s.y <= 50, "write at row " .. s.y) end
 end)
 
 test("rows with CJK names keep fixed column layout", function()
-    write(TMP_DIR .. "/ae_config.txt", "[items]\n1=100=10\n2=100=10\n")
+    cfg('{"items":[{"slot":1,"mode_tag":"restock","target_quantity":100,"target_once":10},{"slot":2,"mode_tag":"restock","target_quantity":100,"target_once":10}]}')
     local ctx = make_ctx()
     ctx.last_order_time.Iron = 5000; ctx.last_order_time["鐵錠"] = 5000
     render(ctx, 5001)
@@ -329,9 +504,12 @@ end)
 
 -- ========== paging (page 2 item list) ==========
 local function many_items(n)
-    local lines, slots = { "[items]" }, {}
-    for i = 1, n do lines[#lines + 1] = i .. "=1=1"; slots[i] = { label = "Item" .. i } end
-    write(TMP_DIR .. "/ae_config.txt", table.concat(lines, "\n") .. "\n")
+    local rows, slots = {}, {}
+    for i = 1, n do
+        rows[#rows + 1] = '{"slot":' .. i .. ',"mode_tag":"restock","target_quantity":1,"target_once":1}'
+        slots[i] = { label = "Item" .. i }
+    end
+    cfg('{"items":[' .. table.concat(rows, ",") .. ']}')
     return slots
 end
 
