@@ -4,9 +4,10 @@ local computer = require("computer")
 local event = require("event")
 local term = require("term")
 
--- 🌟 載入外包的兩個獨立模組
+-- 🌟 載入外包的獨立模組（它們直接讀取本檔案 M 內的參數，不再由這裡傳遞）
 local sdapi = require("sdapi")
 local sdlogic = require("sdlogic")
+local sdquery = require("sdquery")
 
 local M = {} 
 local timer_id, main_thread
@@ -27,7 +28,10 @@ local time_counter = time_delay
 local config_file_path        = "/mnt/4c8/ae_config.txt"
 local log_file_path           = "/mnt/4c8/ae_log.txt"
 local realtime_path           = "/mnt/4c8/realtime.txt"
-_G.time_file_path             = realtime_path
+
+-- 🌟 【AE2 遠端查詢：與 server.lua 中繼電腦配合】
+local query_port              = 102      -- 本機監聽的查詢埠
+local relay_port              = 100      -- server.lua 的 SERVER_PORT (回覆經中繼時使用)
 
 -- 🌟 【新功能：低電量自動唱片機配置】
 local battery_address         = "20b2"   -- 電池地址
@@ -75,6 +79,11 @@ end
 
 local btn1 = { x = 5,  y = 3, w = 25, h = 4, label = "   系統時間大螢幕   " }
 local btn2 = { x = 35, y = 3, w = 25, h = 4, label = "   AE2 核心物資倉   " }
+-- 第二頁專用：物品清單換頁鍵
+local btn_prev = { x = 65, y = 3, w = 14, h = 4, label = "◀ 上一頁" }
+local btn_next = { x = 81, y = 3, w = 14, h = 4, label = "下一頁 ▶" }
+local items_per_page = 35               -- 第 16 列起到螢幕底部
+local list_page, list_pages = 1, 1
 
 -- component.database 在沒有資料庫升級時會直接拋錯，需先檢查
 local db = nil
@@ -87,6 +96,42 @@ elseif component.isAvailable("me_interface") then ae = component.me_interface en
 
 local function get_now_time()
     return computer.uptime()
+end
+
+-- ========================================================
+-- 【對外公開參數】sdapi / sdlogic / sdquery 直接從這裡讀取
+-- ========================================================
+M.gpu, M.ae, M.db = gpu, ae, db
+M.SCR_W, M.SCR_H = SCR_W, SCR_H
+M.config_file_path, M.log_file_path, M.realtime_path = config_file_path, log_file_path, realtime_path
+M.default_cooldown = default_cooldown
+M.active_ae_requests, M.last_order_time = active_ae_requests, last_order_time
+M.battery, M.jukebox = battery_comp, jukebox_comp
+M.energy_threshold, M.high_threshold = low_energy_threshold, high_energy_threshold
+M.query_port, M.relay_port = query_port, relay_port
+M.items_per_page = items_per_page
+M.list_page, M.list_pages = list_page, list_pages
+M.get_now_time = get_now_time
+
+local function is_clicked(cx, cy, btn)
+    return cx >= btn.x and cx < (btn.x + btn.w) and cy >= btn.y and cy < (btn.y + btn.h)
+end
+
+-- 第二頁的換頁鍵與頁碼（只在第二頁顯示）
+function M.draw_pager()
+    if current_page ~= 2 then return end
+    local function draw_btn(btn, enabled)
+        gpu.setBackground(enabled and 0x2255AA or 0x222222)
+        gpu.setForeground(enabled and 0xFFFFFF or 0x666666)
+        gpu.fill(btn.x, btn.y, btn.w, btn.h, " ")
+        gpu.set(btn.x + 2, btn.y + 1, btn.label)
+    end
+    draw_btn(btn_prev, M.list_page > 1)
+    draw_btn(btn_next, M.list_page < M.list_pages)
+    gpu.setBackground(0x000000)
+    gpu.setForeground(0xFFFF00)
+    gpu.set(btn_next.x + btn_next.w + 2, btn_prev.y + 1, string.format("第 %d / %d 頁      ", M.list_page, M.list_pages))
+    gpu.setForeground(0xFFFFFF)
 end
 
 local function draw_navigation()
@@ -110,6 +155,7 @@ local function draw_navigation()
     gpu.setForeground(0x555555)
     gpu.set(1, 8, string.rep("═", SCR_W))
     gpu.setForeground(0xFFFFFF)
+    M.draw_pager()
 end
 
 local function init_page_background()
@@ -163,35 +209,20 @@ local function update_dynamic_data(force_refresh)
 	
 	internal_counter = internal_counter + 1
 	
-    -- 2. 打包執行上下文（將副檔案需要的變數與物件打包在一起）
-    local ctx = {
-        gpu = gpu, ae = ae, db = db,
-        SCR_W = SCR_W, SCR_H = SCR_H,
-        config_file_path = config_file_path,
-        log_file_path = log_file_path,
-        default_cooldown = default_cooldown,
-        active_ae_requests = active_ae_requests,
-        last_order_time = last_order_time,
-		battery = battery_comp,
-        jukebox = jukebox_comp,
-        energy_threshold = low_energy_threshold,
-        high_threshold = high_energy_threshold
-    }
-
     -- 3. 根據頁面進行判斷與外包呼叫（保留判斷，內容清空由新檔案處理）
 	
 	local is_5s_elapsed = (internal_counter >= refresh_delay)
 	
 	if is_5s_elapsed or force_refresh then
-        pcall(sdlogic.check_battery_and_play, ctx)
+        pcall(sdlogic.check_battery_and_play)
     end
 	
     if current_page == 1 then
-        pcall(sdlogic.render_page1, ctx, sdapi)
+        pcall(sdlogic.render_page1)
 
     elseif current_page == 2 and ae and db then
         if is_5s_elapsed or force_refresh then
-            pcall(sdlogic.render_page2, ctx, sdapi, get_now_time())
+            pcall(sdlogic.render_page2)
         end
     end
 	
@@ -203,21 +234,34 @@ local function update_dynamic_data(force_refresh)
 end
 
 
-local function is_clicked(cx, cy, btn)
-    return cx >= btn.x and cx < (btn.x + btn.w) and cy >= btn.y and cy < (btn.y + btn.h)
-end
-
 local function switch_page(page_num)
     current_page = page_num
+    M.list_page = 1
     draw_navigation()
     init_page_background()
     update_dynamic_data(true)
+end
+
+-- 觸控處理：頁籤切換 + 第二頁的上一頁/下一頁
+function M.handle_touch(cx, cy)
+    if is_clicked(cx, cy, btn1) and current_page ~= 1 then
+        switch_page(1)
+    elseif is_clicked(cx, cy, btn2) and current_page ~= 2 then
+        switch_page(2)
+    elseif current_page == 2 and is_clicked(cx, cy, btn_prev) and M.list_page > 1 then
+        M.list_page = M.list_page - 1
+        update_dynamic_data(true)
+    elseif current_page == 2 and is_clicked(cx, cy, btn_next) and M.list_page < M.list_pages then
+        M.list_page = M.list_page + 1
+        update_dynamic_data(true)
+    end
 end
 
 function M.start()
     if timer_id or main_thread then return false, "服務已經在運行中" end
     if full_screen_addr then gpu.bind(full_screen_addr) end
     switch_page(1)
+    sdquery.start()
 
     timer_id = event.timer(1.0, function() update_dynamic_data(false) end, math.huge)
 
@@ -226,11 +270,7 @@ function M.start()
         while true do
             local e, s_addr, cx, cy = event.pull(0.5, "touch")
             if e == "touch" and (not full_screen_addr or s_addr == full_screen_addr) then
-                if is_clicked(cx, cy, btn1) and current_page ~= 1 then
-                    switch_page(1)
-                elseif is_clicked(cx, cy, btn2) and current_page ~= 2 then
-                    switch_page(2)
-                end
+                M.handle_touch(cx, cy)
             end
         end
     end)
@@ -238,6 +278,7 @@ function M.start()
 end
 
 function M.stop()
+    sdquery.stop()
     if timer_id then event.cancel(timer_id) timer_id = nil end
     if main_thread then main_thread:kill() main_thread = nil end
     term.clear()

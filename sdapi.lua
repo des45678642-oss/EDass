@@ -1,4 +1,5 @@
 -- 檔案路徑：sdapi.lua
+-- 所有參數(檔案路徑、資料庫元件…)直接讀取主程式 touch_menu，不再用傳遞的方式。
 local fs = require("filesystem")
 local io = require("io")
 local computer = require("computer")
@@ -6,7 +7,12 @@ local internet = require("internet")
 
 local api = {}
 
-function api.load_hybrid_config(path, db_comp)
+-- 延遲載入主程式，避免與 touch_menu 載入時互相 require 造成循環
+local function main() return require("touch_menu") end
+
+function api.load_hybrid_config()
+    local m = main()
+    local path, db_comp = m.config_file_path, m.db
     local items = {}
     local fluids = {}
     if not fs.exists(path) or not db_comp then return {}, {} end
@@ -32,7 +38,7 @@ function api.load_hybrid_config(path, db_comp)
                             local db_success, item_data = pcall(db_comp.get, slot)
                             if db_success and item_data and item_data.label then
                                 items[#items + 1] = {
-                                    name = item_data.label, 
+                                    name = item_data.label,
                                     min_stock = min_stock,
                                     req_qty = req_qty,
                                     cooldown = cooldown,
@@ -52,8 +58,8 @@ function api.load_hybrid_config(path, db_comp)
 end
 
 function api.update_time()
-    local MY_SERVER_URL = "http://192.168.212.103:8080" 
-    local path = _G.time_file_path or "/mnt/4c8/realtime.txt"
+    local MY_SERVER_URL = "http://192.168.212.103:8080"
+    local path = main().realtime_path
     local result, response = pcall(internet.request, MY_SERVER_URL)
     if result and response then
         local html_content = ""
@@ -87,7 +93,7 @@ function api.get_days_in_month(month, year)
 end
 
 function api.local_tick_time(seconds_to_add)
-    local path = _G.time_file_path or "/mnt/4c8/realtime.txt"
+    local path = main().realtime_path
     local file = io.open(path, "r")
     local cur_date, cur_time = nil, nil
     if file then
@@ -134,7 +140,7 @@ function api.local_tick_time(seconds_to_add)
 end
 
 function api.read_saved_time()
-    local realtime_path = _G.time_file_path or "/mnt/4c8/realtime.txt"
+    local realtime_path = main().realtime_path
     local file = io.open(realtime_path, "r")
     local file_date, file_time = "----- --:--", "--:--:--"
     if file then

@@ -2,7 +2,13 @@
 local io = require("io")
 local component = require("component")
 
+local sdapi = require("sdapi")
+
 local sdlogic = {}
+
+-- 直接讀取主程式 touch_menu 的參數(gpu、ae、db、路徑…)，不再由主程式打包傳遞。
+-- 延遲 require，避免 touch_menu 載入階段互相循環引用。
+local function main() return require("touch_menu") end
 
 -- ========================================================
 -- 【字元寬度輔助】OpenComputers 的 unicode 函式庫；測試環境退回 utf8
@@ -53,7 +59,8 @@ function sdlogic.release_stale_lock(monitor_items)
 end
 
 -- 處理第一頁：系統時間顯示與微調
-function sdlogic.render_page1(ctx, sdapi)
+function sdlogic.render_page1()
+    local ctx = main()
     local file_time, file_date = sdapi.read_saved_time()
     ctx.gpu.setForeground(0xFFFF00)
     ctx.gpu.set(43, 19, file_time .. "        ")
@@ -61,13 +68,17 @@ function sdlogic.render_page1(ctx, sdapi)
 end
 
 -- 處理第二頁：AE2 核心庫存盤點、佇列智慧調度與補貨下單
-function sdlogic.render_page2(ctx, sdapi, now_time)
+function sdlogic.render_page2()
+    local ctx = main()
+    local now_time = ctx.get_now_time()
     -- 1. 即時重新解析設定檔
-    local monitor_items, _ = sdapi.load_hybrid_config(ctx.config_file_path, ctx.db)
+    local monitor_items, _ = sdapi.load_hybrid_config()
     
     -- 如果設定檔是空的或不存在，清除下方舊殘影並給予提示
     sdlogic.release_stale_lock(monitor_items)
     if #monitor_items == 0 then
+        ctx.list_page, ctx.list_pages = 1, 1
+        ctx.draw_pager()
         ctx.gpu.setForeground(0xFFEE00)
         ctx.gpu.set(6, 17, " ⚠️ 目前 ae_config.txt 為空、格式錯誤或硬碟未正確掛載。                        ")
         return
@@ -75,6 +86,15 @@ function sdlogic.render_page2(ctx, sdapi, now_time)
     
     -- 擦除舊數據，防止更換更短的設定檔時產生文字殘影
     ctx.gpu.fill(1, 16, ctx.SCR_W, ctx.SCR_H - 15, " ")
+
+    -- 分頁：全部物品照常運算與下單，但畫面只顯示目前這一頁
+    local per_page = ctx.items_per_page
+    local pages = math.max(1, math.ceil(#monitor_items / per_page))
+    ctx.list_page = math.min(math.max(ctx.list_page, 1), pages)
+    ctx.list_pages = pages
+    ctx.draw_pager()
+    local first_idx = (ctx.list_page - 1) * per_page + 1
+    local last_idx = first_idx + per_page - 1
     
     local log_lines = {}
     local item_dict = {}
@@ -230,8 +250,8 @@ function sdlogic.render_page2(ctx, sdapi, now_time)
         end
         
         -- 渲染至螢幕
-        local row_pos = 15 + idx
-        if row_pos <= ctx.SCR_H then
+        local row_pos = 15 + (idx - first_idx + 1)
+        if idx >= first_idx and idx <= last_idx and row_pos <= ctx.SCR_H then
             ctx.gpu.set(6, row_pos, string.format("  [%02d]|", idx) .. fit(item_name, 35) ..
                 string.format("|%11s |", count_str) .. fit(status_msg, 28) .. "      ")
         end
@@ -253,7 +273,8 @@ end
 -- ========================================================
 -- 【全新擴充：低電量自動控制實體唱片機元件 - 智慧續播版】
 -- ========================================================
-function sdlogic.check_battery_and_play(ctx)
+function sdlogic.check_battery_and_play()
+    local ctx = main()
     if not ctx.battery or not ctx.jukebox then return end
 
     -- ⚡ 核心設定：每 5 秒必定執行一次電量檢查
