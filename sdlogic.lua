@@ -69,7 +69,7 @@ function sdlogic.render_page2(ctx, sdapi, now_time)
     sdlogic.release_stale_lock(monitor_items)
     if #monitor_items == 0 then
         ctx.gpu.setForeground(0xFFEE00)
-        ctx.gpu.set(6, 17, " [!] 目前 ae_config.txt 為空、格式錯誤或硬碟未正確掛載。                        ")
+        ctx.gpu.set(6, 17, " ⚠️ 目前 ae_config.txt 為空、格式錯誤或硬碟未正確掛載。                        ")
         return
     end
     
@@ -148,7 +148,7 @@ function sdlogic.render_page2(ctx, sdapi, now_time)
                         end
                     end
                     ctx.gpu.setForeground(0xFFFFFF)
-                    status_msg = "[庫存充裕安全]"
+                    status_msg = "[✅庫存充裕安全]"
                     tag1, tag2, tag3 = 0, 0, 0
                 else
                     if _G.current_global_task == nil then
@@ -173,7 +173,7 @@ function sdlogic.render_page2(ctx, sdapi, now_time)
                     
                     if _G.current_global_task == item_name then
                         ctx.gpu.setForeground(0x00FF00)
-                        status_msg = string.format("[複製中: Cnf %d | Prio %d]", target_circuit, priority)
+                        status_msg = string.format("[📡 複製中: Cnf %d | Prio %d]", target_circuit, priority)
                         tag1 = 5
                         tag2 = target_circuit
                         
@@ -183,7 +183,7 @@ function sdlogic.render_page2(ctx, sdapi, now_time)
                         end
                     else
                         ctx.gpu.setForeground(0xFFAA00)
-                        status_msg = string.format("[排隊中 (P%d) | 鎖定者: %s]", priority, usub(tostring(_G.current_global_task), 4))
+                        status_msg = string.format("[⏳ 排隊中 (P%d) | 鎖定者: %s]", priority, usub(tostring(_G.current_global_task), 4))
                         tag1 = 6
                         tag2 = 0
                     end
@@ -192,11 +192,11 @@ function sdlogic.render_page2(ctx, sdapi, now_time)
             -- 狀況乙：常規 AE2 補貨邏輯
             elseif tag3 == 1 then
                 ctx.gpu.setForeground(0x55AFFF) 
-                status_msg = "[訂單合成中...]"
+                status_msg = "[🛠 訂單合成中...]"
                 tag1 = 2; tag2 = 999
             elseif last_order > now_time or time_passed < item_cooldown then
                 ctx.gpu.setForeground(0x55AFFF)
-                status_msg = string.format("[補貨冷卻: %ds]", remaining)
+                status_msg = string.format("[🛠 補貨冷卻: %ds]", remaining)
                 tag1 = 2; tag2 = remaining
             else
                 local success_craft, craftables = pcall(ctx.ae.getCraftables, {label = item_name})
@@ -207,17 +207,17 @@ function sdlogic.render_page2(ctx, sdapi, now_time)
                         ctx.last_order_time[item_name] = now_time
                         ctx.active_ae_requests[item_name] = request_handle
                         ctx.gpu.setForeground(0xFFEE00) 
-                        status_msg = string.format("[已下單 +%d]", item_info.req_qty)
+                        status_msg = string.format("[🚀 已下單 +%d]", item_info.req_qty)
                         tag1 = 1
                     else
                         ctx.last_order_time[item_name] = now_time - item_cooldown + 30
                         ctx.gpu.setForeground(0xFF5555) 
-                        status_msg = "[AE拒絕下單/無原料]"
+                        status_msg = "[❌ AE拒絕下單/無原料]"
                         tag1 = 3
                     end
                 else
                     ctx.gpu.setForeground(0xFF5555)
-                    status_msg = "[未在AE中找到配方]"
+                    status_msg = "[⚠️ 未在AE中找到配方]"
                     tag1 = 4
                 end
             end
@@ -225,7 +225,7 @@ function sdlogic.render_page2(ctx, sdapi, now_time)
             if ctx.active_ae_requests[item_name] then ctx.active_ae_requests[item_name] = nil end
             if _G.current_global_task == item_name then _G.current_global_task = nil end
             ctx.gpu.setForeground(count < 10 and 0xFF5555 or 0xFFFFFF)
-            status_msg = "[庫存充裕安全]"
+            status_msg = "[✅庫存充裕安全]"
             tag1, tag2, tag3 = 0, 0, 0
         end
         
