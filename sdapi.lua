@@ -25,7 +25,8 @@ function api.load_hybrid_config(path, db_comp)
                         local slot = tonumber(slot_s) or 0
                         local min_stock = tonumber(min_s) or 0
                         local req_qty = tonumber(req_s) or 0
-                        local cooldown = tonumber(cd_s) or 1
+                        -- 留空時保持 nil，讓呼叫端套用全域預設冷卻 (default_cooldown)
+                        local cooldown = tonumber(cd_s)
                         local priority = tonumber(prio_s) or 9
                         if slot > 0 then
                             local db_success, item_data = pcall(db_comp.get, slot)
@@ -56,10 +57,14 @@ function api.update_time()
     local result, response = pcall(internet.request, MY_SERVER_URL)
     if result and response then
         local html_content = ""
+        -- 讀取設有 5 秒上限，避免伺服器無回應時卡死計時器回呼
+        local deadline = computer.uptime() + 5
+        local read = (type(response) == "table" and type(response.read) == "function") and response.read or response
         repeat
-            local chunk = response.read()
+            local ok, chunk = pcall(read)
+            if not ok then chunk = nil end
             if chunk then html_content = html_content .. chunk end
-        until not chunk
+        until not chunk or computer.uptime() > deadline
         local raw_time = string.match(html_content, 'id="time">([^<]+)</span>')
         local raw_date = string.match(html_content, 'id="date">([^<]+)</span>')
         if raw_time and raw_date then
@@ -129,7 +134,7 @@ function api.local_tick_time(seconds_to_add)
 end
 
 function api.read_saved_time()
-    local realtime_path = "/mnt/4c8/realtime.txt"
+    local realtime_path = _G.time_file_path or "/mnt/4c8/realtime.txt"
     local file = io.open(realtime_path, "r")
     local file_date, file_time = "----- --:--", "--:--:--"
     if file then

@@ -4,6 +4,54 @@ local component = require("component")
 
 local sdlogic = {}
 
+-- ========================================================
+-- 【字元寬度輔助】OpenComputers 的 unicode 函式庫；測試環境退回 utf8
+-- ========================================================
+local has_unicode, unicode = pcall(require, "unicode")
+if not has_unicode then unicode = nil end
+
+local function ulen(s)
+    if unicode and unicode.wlen then return unicode.wlen(s) end
+    return utf8.len(s) or #s
+end
+
+-- 取前 n 個字元（不會切斷 UTF-8 多位元組字元）
+local function usub(s, n)
+    if n <= 0 then return "" end
+    if unicode and unicode.sub then return unicode.sub(s, 1, n) end
+    local len = utf8.len(s)
+    if not len or len <= n then return s end
+    return s:sub(1, utf8.offset(s, n + 1) - 1)
+end
+
+-- 依顯示寬度補空白（超過則截斷），修正 %-35s 以位元組計算造成的中文錯位
+local function fit(s, w)
+    s = tostring(s)
+    while ulen(s) > w do
+        local chars = utf8.len(s) or #s
+        s = usub(s, chars - 1)
+    end
+    return s .. string.rep(" ", w - ulen(s))
+end
+sdlogic.fit = fit
+sdlogic.usub = usub
+
+-- 全域鎖持有者若已不在設定檔中，或不再是特殊複製模式，就強制解鎖，
+-- 避免其他複製物品永遠排隊。
+function sdlogic.release_stale_lock(monitor_items)
+    local current = _G.current_global_task
+    if not current then return end
+    for _, info in ipairs(monitor_items) do
+        if info.name == current and info.min_stock > 0 and info.req_qty == 0 then
+            return
+        end
+    end
+    _G.current_global_task = nil
+    if component.isAvailable("modem") then
+        component.modem.broadcast(201, "STOP_CLONE")
+    end
+end
+
 -- 處理第一頁：系統時間顯示與微調
 function sdlogic.render_page1(ctx, sdapi)
     local file_time, file_date = sdapi.read_saved_time()
@@ -18,9 +66,10 @@ function sdlogic.render_page2(ctx, sdapi, now_time)
     local monitor_items, _ = sdapi.load_hybrid_config(ctx.config_file_path, ctx.db)
     
     -- 如果設定檔是空的或不存在，清除下方舊殘影並給予提示
+    sdlogic.release_stale_lock(monitor_items)
     if #monitor_items == 0 then
         ctx.gpu.setForeground(0xFFEE00)
-        ctx.gpu.set(6, 17, " ⚠️ 目前 ae_config.txt 為空、格式錯誤或硬碟未正確掛載。                        ")
+        ctx.gpu.set(6, 17, " [!] 目前 ae_config.txt 為空、格式錯誤或硬碟未正確掛載。                        ")
         return
     end
     
@@ -92,19 +141,16 @@ function sdlogic.render_page2(ctx, sdapi, now_time)
                 
                 if count >= item_info.min_stock then
                     if _G.current_global_task == item_name then
-                        --print("🎉 [調度中心] 高優先級物品已達標，解鎖全域通道: " .. item_name)
+                        --print("[調度中心] 高優先級物品已達標，解鎖全域通道: " .. item_name)
                         _G.current_global_task = nil
                         if component.isAvailable("modem") then
                             component.modem.broadcast(201, "STOP_CLONE")
                         end
                     end
                     ctx.gpu.setForeground(0xFFFFFF)
-                    status_msg = "[✅庫存充裕安全]"
+                    status_msg = "[庫存充裕安全]"
                     tag1, tag2, tag3 = 0, 0, 0
                 else
-                    _G.global_queue = _G.global_queue or {}
-                    _G.global_queue[item_name] = priority
-                    
                     if _G.current_global_task == nil then
                         _G.current_global_task = item_name
                     else
@@ -117,7 +163,7 @@ function sdlogic.render_page2(ctx, sdapi, now_time)
                         end
                         
                         if priority < current_running_priority then
-                            --print(string.format("🚨 [權重插隊] 發現更高優先級物資！強制換單 [%s] -> [%s]", _G.current_global_task, item_name))
+                            --print(string.format("[權重插隊] 發現更高優先級物資！強制換單 [%s] -> [%s]", _G.current_global_task, item_name))
                             _G.current_global_task = item_name
                             if component.isAvailable("modem") then
                                 component.modem.broadcast(201, "KEEP_ALIVE", target_circuit, item_info.min_stock, count)
@@ -127,7 +173,7 @@ function sdlogic.render_page2(ctx, sdapi, now_time)
                     
                     if _G.current_global_task == item_name then
                         ctx.gpu.setForeground(0x00FF00)
-                        status_msg = string.format("[📡 複製中: Cnf %d | Prio %d]", target_circuit, priority)
+                        status_msg = string.format("[複製中: Cnf %d | Prio %d]", target_circuit, priority)
                         tag1 = 5
                         tag2 = target_circuit
                         
@@ -137,7 +183,7 @@ function sdlogic.render_page2(ctx, sdapi, now_time)
                         end
                     else
                         ctx.gpu.setForeground(0xFFAA00)
-                        status_msg = string.format("[⏳ 排隊中 (P%d) | 鎖定者: %s]", priority, tostring(_G.current_global_task):sub(1,4))
+                        status_msg = string.format("[排隊中 (P%d) | 鎖定者: %s]", priority, usub(tostring(_G.current_global_task), 4))
                         tag1 = 6
                         tag2 = 0
                     end
@@ -146,11 +192,11 @@ function sdlogic.render_page2(ctx, sdapi, now_time)
             -- 狀況乙：常規 AE2 補貨邏輯
             elseif tag3 == 1 then
                 ctx.gpu.setForeground(0x55AFFF) 
-                status_msg = "[🛠 訂單合成中...]"
+                status_msg = "[訂單合成中...]"
                 tag1 = 2; tag2 = 999
             elseif last_order > now_time or time_passed < item_cooldown then
                 ctx.gpu.setForeground(0x55AFFF)
-                status_msg = string.format("[🛠 補貨冷卻: %ds]", remaining)
+                status_msg = string.format("[補貨冷卻: %ds]", remaining)
                 tag1 = 2; tag2 = remaining
             else
                 local success_craft, craftables = pcall(ctx.ae.getCraftables, {label = item_name})
@@ -161,32 +207,34 @@ function sdlogic.render_page2(ctx, sdapi, now_time)
                         ctx.last_order_time[item_name] = now_time
                         ctx.active_ae_requests[item_name] = request_handle
                         ctx.gpu.setForeground(0xFFEE00) 
-                        status_msg = string.format("[🚀 已下單 +%d]", item_info.req_qty)
+                        status_msg = string.format("[已下單 +%d]", item_info.req_qty)
                         tag1 = 1
                     else
                         ctx.last_order_time[item_name] = now_time - item_cooldown + 30
                         ctx.gpu.setForeground(0xFF5555) 
-                        status_msg = "[❌ AE拒絕下單/無原料]"
+                        status_msg = "[AE拒絕下單/無原料]"
                         tag1 = 3
                     end
                 else
                     ctx.gpu.setForeground(0xFF5555)
-                    status_msg = "[⚠️ 未在AE中找到配方]"
+                    status_msg = "[未在AE中找到配方]"
                     tag1 = 4
                 end
             end
         else
             if ctx.active_ae_requests[item_name] then ctx.active_ae_requests[item_name] = nil end
-            if _G.global_queue then _G.global_queue[item_name] = nil end
             if _G.current_global_task == item_name then _G.current_global_task = nil end
             ctx.gpu.setForeground(count < 10 and 0xFF5555 or 0xFFFFFF)
-            status_msg = "[✅庫存充裕安全]"
+            status_msg = "[庫存充裕安全]"
             tag1, tag2, tag3 = 0, 0, 0
         end
         
         -- 渲染至螢幕
         local row_pos = 15 + idx
-        ctx.gpu.set(6, row_pos, string.format("  [%02d]|%-35s|%11s |%-28s      ", idx, item_name, count_str, status_msg))
+        if row_pos <= ctx.SCR_H then
+            ctx.gpu.set(6, row_pos, string.format("  [%02d]|", idx) .. fit(item_name, 35) ..
+                string.format("|%11s |", count_str) .. fit(status_msg, 28) .. "      ")
+        end
         
         -- 快照紀錄
         table.insert(log_lines, string.format("%s=%d=%d=%d", item_name, tag1, tag2, tag3))
@@ -240,7 +288,7 @@ function sdlogic.check_battery_and_play(ctx)
                 _G.is_low_power_alert = false
                 _G.jukebox_loop_counter = 0 -- 計時歸零
                 if type(ctx.jukebox.stop) == "function" then
-                    pcall(component.jukebox.stop)
+                    pcall(ctx.jukebox.stop)
                 end
                 --print(string.format("[系統通知] 電量已回升至安全線 (%.1f%%)，已關閉音樂。", used_capacity_percent))
             end
@@ -253,7 +301,7 @@ function sdlogic.check_battery_and_play(ctx)
             -- 只有當累加滿 60 秒（或剛觸發第一次）時，才真正呼叫一次 play()
             if _G.jukebox_loop_counter >= 60 then
                 _G.jukebox_loop_counter = 0 -- 滿 60 秒歸零，重新等待下一分鐘
-                pcall(component.jukebox.play)
+                pcall(ctx.jukebox.play)
             end
         end
     end

@@ -3,9 +3,6 @@ local component = require("component")
 local computer = require("computer")
 local event = require("event")
 local term = require("term")
-local io = require("io")
-local fs = require("filesystem")
-local internet = require("internet")
 
 -- 🌟 載入外包的兩個獨立模組
 local sdapi = require("sdapi")
@@ -44,7 +41,6 @@ local last_order_time = {}
 
 -- 【全域調度變數宣告】用於多配方全域唯一排隊互鎖機制
 _G.current_global_task = _G.current_global_task or nil
-_G.global_queue = _G.global_queue or {}
 
 -- 硬體代理與精確繫結
 local gpu = nil
@@ -80,9 +76,10 @@ end
 local btn1 = { x = 5,  y = 3, w = 25, h = 4, label = "   系統時間大螢幕   " }
 local btn2 = { x = 35, y = 3, w = 25, h = 4, label = "   AE2 核心物資倉   " }
 
-local db = component.database
+-- component.database 在沒有資料庫升級時會直接拋錯，需先檢查
+local db = nil
+if component.isAvailable("database") then db = component.database end
 local SCR_W, SCR_H = 160, 50
-gpu.setResolution(SCR_W, SCR_H)
 
 local ae = nil
 if component.isAvailable("me_controller") then ae = component.me_controller
@@ -93,10 +90,12 @@ local function get_now_time()
 end
 
 local function draw_navigation()
-	gpu.setBackground(0x000000)
-    gpu.setForeground(0xFFFFFF)
-	gpu.fill(1, 1, 160, 50, " ")
+    -- 先綁定螢幕再設定解析度與繪製，否則第一次會畫到錯誤的螢幕
     if full_screen_addr then gpu.bind(full_screen_addr) end
+    gpu.setResolution(SCR_W, SCR_H)
+    gpu.setBackground(0x000000)
+    gpu.setForeground(0xFFFFFF)
+    gpu.fill(1, 1, SCR_W, SCR_H, " ")
     gpu.setBackground(current_page == 1 and 0x00FF00 or 0x222222)
     gpu.setForeground(current_page == 1 and 0x000000 or 0xDDDDDD)
     gpu.fill(btn1.x, btn1.y, btn1.w, btn1.h, " ")
@@ -157,9 +156,8 @@ local function update_dynamic_data(force_refresh)
         pcall(sdapi.update_time) 
         time_counter = 0
     else
-        if current_page == 1 then
-            pcall(sdapi.local_tick_time, 1)
-        end
+        -- 不分頁面都推進時鐘，切回第一頁時才不會顯示過期時間
+        pcall(sdapi.local_tick_time, 1)
         time_counter = time_counter + 1
     end
 	
@@ -189,11 +187,11 @@ local function update_dynamic_data(force_refresh)
     end
 	
     if current_page == 1 then
-        sdlogic.render_page1(ctx, sdapi)
-        
+        pcall(sdlogic.render_page1, ctx, sdapi)
+
     elseif current_page == 2 and ae and db then
         if is_5s_elapsed or force_refresh then
-            sdlogic.render_page2(ctx, sdapi, get_now_time())
+            pcall(sdlogic.render_page2, ctx, sdapi, get_now_time())
         end
     end
 	
