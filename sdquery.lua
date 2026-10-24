@@ -1,84 +1,92 @@
 -- 檔案路徑：sdquery.lua
 -- 讓其他電腦(經由 server.lua 中繼或直接)查詢 AE2 物品數量。
--- 只能查「已經存在於 database 組件格子裡」的物品，查詢以 database 格子編號為單位。
+-- 只能查「已登錄在 ae_config.json 裡」的物品 (物品要先放進 database 並掃描新增)，以 label 查詢。
+--
+-- OpenComputers 一則網路訊息最多 8 個參數，所以內容一律包成「一個 JSON 字串」。
 --
 -- 請求 (送到本機 query_port，預設 102)：
---   "AE_QUERY", 請求編號, 回覆電腦UUID, 回覆埠號, "1,2,64", [中繼電腦UUID]
---   第 6 個參數可省略；填入 server.lua 所在電腦的 UUID 時，回覆會透過
---   該電腦的 FORWARD_CMD (Port 100) 轉發，否則直接回覆到「回覆電腦UUID」。
+--   "AE_QUERY", '{"id":"r1","reply_to":"<回覆電腦UUID>","reply_port":777,"keys":["Iron","鐵錠"],"via":"<中繼UUID，可省略>"}'
+--   經 server.lua 中繼時，改送到中繼電腦的 Port 100：
+--   "FORWARD_CMD", <touch_menu 電腦UUID>, 102, "AE_QUERY", '{...同上...}'
+--   有填 via 時，回覆會透過該電腦的 FORWARD_CMD (Port 100) 轉發，否則直接回覆到 reply_to。
 --
--- 回覆 (每個格子一則 + 一則結束訊息)：
---   "AE_QUERY_REPLY", 請求編號, 格子編號, 成功(boolean), 物品名稱(失敗時為錯誤訊息), 數量
---   "AE_QUERY_DONE",  請求編號, 查詢的格子總數
+-- 回覆 (每個物品一則 + 一則結束訊息)：
+--   "AE_QUERY_REPLY", '{"id":"r1","key":"Iron","ok":true,"count":123,"name":"minecraft:iron_ingot","damage":0}'
+--   "AE_QUERY_REPLY", '{"id":"r1","key":"Gold","ok":false,"error":"..."}'
+--   "AE_QUERY_DONE",  '{"id":"r1","n":2}'
 local component = require("component")
 local event = require("event")
 local sdlogic = require("sdlogic")
+local json = require("sdjson")
 
 local sdquery = {}
 
 -- 延遲載入主程式(直接讀取其參數，不用傳遞)
 local function main() return require("touch_menu") end
 
-local MAX_SLOTS = 60
+local MAX_KEYS = 60
+local MAX_PAYLOAD = 8192
 local listener = nil
 
--- 查詢單一 database 格子，回傳 label, count 或 nil, 錯誤訊息
--- (資料庫與 AE2 計數都與第二頁共用 sdlogic 的實作，數字一定一致)
-function sdquery.query_slot(slot)
-    local m = main()
-    local db = sdlogic.get_database()
-    if not db then return nil, "找不到 database 組件" end
-    local ok, stack = pcall(db.get, slot)
-    if not ok then return nil, "格子編號無效" end
-    if type(stack) ~= "table" or not stack.label then return nil, "database 該格子是空的" end
-    local count, err = sdlogic.count_item({ name = stack.name, damage = stack.damage, label = stack.label }, m.ae)
-    if not count then return nil, err end
-    return stack.label, count
-end
-
-local function parse_slots(raw)
-    local slots = {}
-    if type(raw) == "number" then
-        slots[1] = math.floor(raw)
-    else
-        for n in tostring(raw or ""):gmatch("%d+") do
-            if #slots >= MAX_SLOTS then break end
-            slots[#slots + 1] = tonumber(n)
-        end
-    end
-    return slots
-end
-
-local function reply(modem, via, reply_to, reply_port, ...)
-    local m = main()
+-- 送出回覆。全部包成單一 JSON 字串，經中繼時總共 5 個參數，遠低於 8 個的上限
+local function reply(modem, via, reply_to, reply_port, msg_type, body)
+    local text = json.encode(body, { compact = true })
+    if not text then return end
     if via and via ~= "" then
-        modem.send(via, m.relay_port, "FORWARD_CMD", reply_to, reply_port, ...)
+        modem.send(via, main().relay_port, "FORWARD_CMD", reply_to, reply_port, msg_type, text)
     else
-        modem.send(reply_to, reply_port, ...)
+        modem.send(reply_to, reply_port, msg_type, text)
     end
 end
 
--- 處理一則請求；modem 為收到請求的那張網卡 (用同一張回覆)
-function sdquery.process(modem, req_id, reply_to, reply_port, slots_raw, via)
-    if not reply_to or not reply_port then return false end
-    local slots = parse_slots(slots_raw)
-    for _, slot in ipairs(slots) do
-        local label, count_or_err = sdquery.query_slot(slot)
-        if label then
-            reply(modem, via, reply_to, reply_port, "AE_QUERY_REPLY", req_id, slot, true, label, count_or_err)
-        else
-            reply(modem, via, reply_to, reply_port, "AE_QUERY_REPLY", req_id, slot, false, count_or_err, 0)
+-- 處理一則(已解碼的)請求；modem 為收到請求的那張網卡 (用同一張回覆)
+function sdquery.process(modem, request)
+    if type(request) ~= "table" then return false end
+    local reply_to, reply_port, id = request.reply_to, request.reply_port, request.id
+    local via = request.via
+    if type(reply_to) ~= "string" or type(reply_port) ~= "number" then return false end
+    if type(via) ~= "string" then via = nil end
+    local keys = type(request.keys) == "table" and request.keys or {}
+
+    local items = sdlogic.load_hybrid_config()
+    local m = main()
+    local n = 0
+    for idx, key in ipairs(keys) do
+        if idx > MAX_KEYS then break end
+        n = n + 1
+        local matched = false
+        if type(key) == "string" then
+            for _, item in ipairs(items) do
+                if item.label == key then
+                    matched = true
+                    local count, err = sdlogic.count_item(item, m.ae)
+                    if count then
+                        reply(modem, via, reply_to, reply_port, "AE_QUERY_REPLY",
+                            { id = id, key = key, ok = true, count = count, name = item.name, damage = item.damage })
+                    else
+                        reply(modem, via, reply_to, reply_port, "AE_QUERY_REPLY",
+                            { id = id, key = key, ok = false, error = err, name = item.name, damage = item.damage })
+                    end
+                end
+            end
+        end
+        if not matched then
+            reply(modem, via, reply_to, reply_port, "AE_QUERY_REPLY",
+                { id = id, key = tostring(key), ok = false, error = "未登錄的物品 (請先放進 database 並掃描新增)" })
         end
     end
-    reply(modem, via, reply_to, reply_port, "AE_QUERY_DONE", req_id, #slots)
+    reply(modem, via, reply_to, reply_port, "AE_QUERY_DONE", { id = id, n = n })
     return true
 end
 
-local function on_modem_message(_, local_addr, _, port, _, msg, req_id, reply_to, reply_port, slots_raw, via)
+local function on_modem_message(_, local_addr, _, port, _, msg, payload)
     local m = main()
     if port ~= m.query_port or msg ~= "AE_QUERY" then return end
+    if type(payload) ~= "string" or #payload > MAX_PAYLOAD then return end
+    local request = json.decode(payload)
+    if type(request) ~= "table" then return end
     local ok, err = pcall(function()
-        sdquery.process(component.proxy(local_addr), req_id, reply_to, reply_port, slots_raw, via)
+        sdquery.process(component.proxy(local_addr), request)
     end)
     if not ok then io.stderr:write("AE_QUERY 處理失敗: " .. tostring(err) .. "\n") end
 end

@@ -161,4 +161,92 @@ function json.decode(str)
     return nil, "JSON 解析錯誤: " .. tostring(result)
 end
 
+-- ========================================================
+-- encode：輸出穩定、好讀的 JSON (鍵的順序固定，方便手動編輯與比對差異)
+-- 最上層物件逐行排版；items 陣列每筆物品佔一行。回傳 text 或 nil, 錯誤訊息。
+-- 注意：空的 table 一律輸出為 []。
+-- ========================================================
+local KEY_ORDER = { "database", "items", "name", "damage", "label", "mode_tag", "target_quantity",
+                    "target_once", "cooldown", "circuit", "priority" }
+local KEY_RANK = {}
+for i, k in ipairs(KEY_ORDER) do KEY_RANK[k] = i end
+
+local function encode_string(s)
+    s = s:gsub('[%c"\\]', function(c)
+        if c == '"' then return '\\"' end
+        if c == "\\" then return '\\\\' end
+        if c == "\n" then return "\\n" end
+        if c == "\r" then return "\\r" end
+        if c == "\t" then return "\\t" end
+        return string.format("\\u%04x", c:byte())
+    end)
+    return '"' .. s .. '"'
+end
+
+local function encode_number(n)
+    if n ~= n or n == math.huge or n == -math.huge then error({ json_error = "無法編碼 NaN/Infinity" }, 0) end
+    if n == math.floor(n) and math.abs(n) < 2 ^ 53 then return string.format("%d", n) end
+    return string.format("%.14g", n)
+end
+
+local function is_array(t)
+    local n = 0
+    for _ in pairs(t) do n = n + 1 end
+    if n == 0 then return true end
+    for i = 1, n do if t[i] == nil then return false end end
+    return true
+end
+
+local function sorted_keys(t)
+    local keys = {}
+    for k in pairs(t) do
+        if type(k) ~= "string" then error({ json_error = "物件的鍵必須是字串" }, 0) end
+        keys[#keys + 1] = k
+    end
+    table.sort(keys, function(a, b)
+        local ra, rb = KEY_RANK[a], KEY_RANK[b]
+        if ra and rb then return ra < rb end
+        if ra then return true end
+        if rb then return false end
+        return a < b
+    end)
+    return keys
+end
+
+local function encode_value(v, depth, compact, seen)
+    local tv = type(v)
+    if v == json.null or v == nil then return "null" end
+    if tv == "string" then return encode_string(v) end
+    if tv == "number" then return encode_number(v) end
+    if tv == "boolean" then return tostring(v) end
+    if tv ~= "table" then error({ json_error = "無法編碼型別 " .. tv }, 0) end
+    if seen[v] then error({ json_error = "資料有循環參照" }, 0) end
+    seen[v] = true
+    local inline = compact or depth >= 2
+    local pad = inline and "" or string.rep("  ", depth + 1)
+    local nl = inline and "" or "\n"
+    local sep = inline and ", " or (",\n")
+    local parts = {}
+    local out
+    if is_array(v) then
+        for i = 1, #v do parts[#parts + 1] = pad .. encode_value(v[i], depth + 1, compact, seen) end
+        if #parts == 0 then out = "[]"
+        else out = "[" .. nl .. table.concat(parts, sep) .. nl .. (inline and "" or string.rep("  ", depth)) .. "]" end
+    else
+        for _, k in ipairs(sorted_keys(v)) do
+            parts[#parts + 1] = pad .. encode_string(k) .. ": " .. encode_value(v[k], depth + 1, compact, seen)
+        end
+        out = "{" .. nl .. table.concat(parts, sep) .. nl .. (inline and "" or string.rep("  ", depth)) .. "}"
+    end
+    seen[v] = nil
+    return out
+end
+
+function json.encode(value, opts)
+    local ok, result = pcall(encode_value, value, 0, opts and opts.compact, {})
+    if ok then return result .. ((opts and opts.compact) and "" or "\n") end
+    if type(result) == "table" and result.json_error then return nil, result.json_error end
+    return nil, "JSON 編碼錯誤: " .. tostring(result)
+end
+
 return json

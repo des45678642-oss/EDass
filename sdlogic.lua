@@ -47,7 +47,8 @@ sdlogic.usub = usub
 
 -- ========================================================
 -- 【設定檔載入】ae_config.json (原本在 sdapi.load_hybrid_config)
--- 每筆物品只寫 database 格子編號 slot；name / damage / label 載入時用 database.get 查詢。
+-- 每筆物品直接存 name / damage / label (方便查詢)。database 只用來「新增物品」：
+-- 初始化時與按下掃描鍵時，把 database 裡還沒登記的物品加進 JSON。
 -- ========================================================
 local MODES = { restock = true, clone = true, monitor = true }
 local parse_cache = { path = nil, mtime = nil, data = nil }
@@ -62,11 +63,11 @@ end
 local function is_int(n) return type(n) == "number" and n == math.floor(n) end
 
 -- 讀取並解析 JSON；檔案沒變 (lastModified 相同) 就沿用上次解析結果
-function sdlogic.parse_config_file(path)
+function sdlogic.parse_config_file(path, force)
     if not fs.exists(path) then return nil, "找不到設定檔 " .. tostring(path) end
     local ok, mtime = pcall(fs.lastModified, path)
     if not ok then mtime = nil end
-    if mtime and parse_cache.path == path and parse_cache.mtime == mtime and parse_cache.data then
+    if not force and mtime and parse_cache.path == path and parse_cache.mtime == mtime and parse_cache.data then
         return parse_cache.data
     end
     local f = io.open(path, "r")
@@ -78,14 +79,20 @@ function sdlogic.parse_config_file(path)
     if type(data) ~= "table" or type(data.items) ~= "table" then
         return nil, 'JSON 最上層必須是物件且含有 "items" 陣列'
     end
-    parse_cache.path, parse_cache.mtime, parse_cache.data = path, mtime, data
+    if not force then parse_cache.path, parse_cache.mtime, parse_cache.data = path, mtime, data end
     return data
 end
 
+-- 物品的唯一識別 (name + damage + label)。所有狀態表(冷卻、訂單、全域鎖)都用它當鍵，
+-- 同名(label)但不同物品不會互相干擾。
+function sdlogic.item_key(name, damage, label)
+    return tostring(name) .. "@" .. tostring(damage) .. "@" .. tostring(label)
+end
+
 -- 依 JSON 的 database 欄位(位址前綴)選擇資料庫元件；沒填或找不到就用主程式預設的 db
-function sdlogic.get_database()
+function sdlogic.get_database(config)
     local m = main()
-    local data = parse_cache.data
+    local data = config or parse_cache.data
     local prefix = data and val(data.database)
     if type(prefix) == "string" and prefix ~= "" then
         local ok, found = pcall(function()
@@ -98,12 +105,20 @@ function sdlogic.get_database()
     return m.db
 end
 
--- 驗證單筆設定並用 database 補齊 name/damage/label。回傳 entry 或 nil, 錯誤訊息
-local function build_entry(raw, index, db)
+-- 驗證單筆設定。回傳 entry 或 nil, 錯誤訊息
+local function build_entry(raw, index, seen)
     if type(raw) ~= "table" or raw == json.null then return nil, string.format("第 %d 筆不是物件", index) end
-    local slot = val(raw.slot)
-    if not (is_int(slot) and slot > 0) then return nil, string.format("第 %d 筆: slot 必須是正整數", index) end
-    local tag = "slot " .. slot
+    local name, damage, label = val(raw.name), val(raw.damage), val(raw.label)
+    if label == nil and val(raw.slot) ~= nil then
+        return nil, string.format("第 %d 筆 (slot %s) 尚未轉換成 name/damage/label，請重新啟動讓它自動轉換", index, tostring(raw.slot))
+    end
+    if type(label) ~= "string" or label == "" then return nil, string.format("第 %d 筆: label 必須是非空字串", index) end
+    local tag = label
+    if type(name) ~= "string" or name == "" then return nil, tag .. ": name 必須是非空字串" end
+    if not (is_int(damage) and damage >= 0) then return nil, tag .. ": damage 必須是 >=0 的整數" end
+    local key = sdlogic.item_key(name, damage, label)
+    if seen[key] then return nil, tag .. ": 重複的物品 (name/damage/label 相同)" end
+
     local mode = val(raw.mode_tag)
     if not MODES[mode or ""] then return nil, tag .. ": mode_tag 必須是 restock / clone / monitor" end
 
@@ -132,19 +147,16 @@ local function build_entry(raw, index, db)
             priority = p
         end
     end
-
-    local ok, stack = pcall(db.get, slot)
-    if not ok or type(stack) ~= "table" or not stack.label then
-        return nil, string.format("database 格子 %d 是空的或無法讀取", slot)
-    end
+    seen[key] = true
     return {
-        slot = slot, name = stack.name, damage = stack.damage, label = stack.label,
+        key = key, name = name, damage = damage, label = label,
         target_quantity = target, target_once = once, cooldown = cooldown,
         mode_tag = mode, circuit = circuit, priority = priority,
     }
 end
 
 -- 回傳 items, errors。設定有問題的項目會被略過並列在 errors，絕不丟出例外。
+-- 不再需要 database：物品資料全部來自 JSON。
 function sdlogic.load_hybrid_config()
     local m = main()
     local errors = {}
@@ -160,14 +172,150 @@ function sdlogic.load_hybrid_config()
     else
         last_good = data
     end
-    local db = sdlogic.get_database()
-    if not db then return {}, { "找不到 database 組件" } end
-    local items = {}
+    local items, seen = {}, {}
     for i, raw in ipairs(data.items) do
-        local entry, e = build_entry(raw, i, db)
+        local entry, e = build_entry(raw, i, seen)
         if entry then items[#items + 1] = entry else errors[#errors + 1] = e end
     end
     return items, errors
+end
+
+-- ========================================================
+-- 【寫回設定檔】與【database 掃描新增物品】
+-- ========================================================
+local function read_all(path)
+    local f = io.open(path, "r")
+    if not f then return nil end
+    local text = f:read("*a")
+    f:close()
+    return text
+end
+
+local function write_all(path, text)
+    local f = io.open(path, "w")
+    if not f then return false end
+    f:write(text)
+    f:close()
+    return true
+end
+
+-- 寫入 JSON：先備份舊檔(.bak)，寫完立刻重讀驗證，壞掉就還原
+function sdlogic.save_config(path, data)
+    local text, err = json.encode(data)
+    if not text then return false, "編碼失敗: " .. tostring(err) end
+    local old = fs.exists(path) and read_all(path) or nil
+    if old then write_all(path .. ".bak", old) end
+    if not write_all(path, text) then return false, "無法寫入 " .. tostring(path) end
+    local back = read_all(path)
+    if not back or not json.decode(back) then
+        if old then write_all(path, old) end
+        return false, "寫入後驗證失敗，已還原舊檔"
+    end
+    parse_cache.path, parse_cache.mtime, parse_cache.data = nil, nil, nil
+    return true
+end
+
+-- 讀取最新的設定檔準備修改；檔案不存在時回傳空設定 (掃描會建立它)
+local function read_for_edit(path)
+    if not fs.exists(path) then return { items = {} } end
+    local data, err = sdlogic.parse_config_file(path, true)
+    if not data then return nil, err end
+    return data
+end
+
+local function db_stack(db, slot)
+    local ok, stack = pcall(db.get, slot)
+    if ok and type(stack) == "table" and type(stack.label) == "string" and stack.label ~= ""
+        and type(stack.name) == "string" and stack.name ~= "" then
+        return stack
+    end
+end
+
+-- 舊格式 (只有 slot) 的項目：用 database 補上 name/damage/label 並移除 slot。回傳 轉換筆數, 錯誤
+function sdlogic.migrate_legacy_slots()
+    local m = main()
+    local path = m.config_file_path
+    if not fs.exists(path) then return 0 end
+    local data, err = read_for_edit(path)
+    if not data then return 0, err end
+    local pending = false
+    for _, raw in ipairs(data.items) do
+        if type(raw) == "table" and val(raw.label) == nil and val(raw.slot) ~= nil then pending = true end
+    end
+    if not pending then return 0 end
+    local db = sdlogic.get_database(data)
+    if not db then return 0, "找不到 database 組件，無法轉換舊格式 (slot)" end
+    local changed = 0
+    for _, raw in ipairs(data.items) do
+        if type(raw) == "table" and val(raw.label) == nil and is_int(val(raw.slot)) then
+            local stack = db_stack(db, raw.slot)
+            if stack then
+                raw.name, raw.damage, raw.label = stack.name, stack.damage or 0, stack.label
+                raw.slot = nil
+                changed = changed + 1
+            end
+        end
+    end
+    if changed > 0 then
+        local ok, e = sdlogic.save_config(path, data)
+        if not ok then return 0, e end
+    end
+    return changed
+end
+
+-- 掃描 database，把 JSON 裡還沒有的物品新增進去 (mode_tag = monitor，只顯示不補貨)。
+-- 回傳 新增數量, 新增的 label 清單；失敗回傳 nil, 錯誤訊息。
+function sdlogic.scan_database()
+    local m = main()
+    local path = m.config_file_path
+    local data, err = read_for_edit(path)
+    if not data then return nil, "設定檔無法讀取，已取消掃描以免覆蓋: " .. tostring(err) end
+    local db = sdlogic.get_database(data)
+    if not db then return nil, "找不到 database 組件" end
+    if type(data.items) ~= "table" then return nil, '設定檔缺少 "items" 陣列' end
+
+    local known = {}
+    for _, raw in ipairs(data.items) do
+        if type(raw) == "table" then
+            local n, d, l = val(raw.name), val(raw.damage), val(raw.label)
+            if n and l then known[sdlogic.item_key(n, d or 0, l)] = true end
+        end
+    end
+
+    local added = {}
+    for slot = 1, (m.database_slots or 81) do
+        local stack = db_stack(db, slot)
+        if stack then
+            local damage = stack.damage or 0
+            local key = sdlogic.item_key(stack.name, damage, stack.label)
+            if not known[key] then
+                known[key] = true
+                data.items[#data.items + 1] = {
+                    name = stack.name, damage = damage, label = stack.label,
+                    mode_tag = "monitor", target_quantity = 0,
+                }
+                added[#added + 1] = stack.label
+            end
+        end
+    end
+    if #added > 0 then
+        local ok, e = sdlogic.save_config(path, data)
+        if not ok then return nil, e end
+    end
+    return #added, added
+end
+
+-- 初始化：先轉換舊格式，再掃描新增。回傳 訊息, 是否有錯誤 (沒事可做回傳 nil)
+function sdlogic.init_config()
+    local msgs, had_error = {}, false
+    local migrated, merr = sdlogic.migrate_legacy_slots()
+    if merr then msgs[#msgs + 1] = merr; had_error = true
+    elseif migrated > 0 then msgs[#msgs + 1] = string.format("已轉換 %d 筆舊格式", migrated) end
+    local n, added = sdlogic.scan_database()
+    if not n then msgs[#msgs + 1] = added; had_error = true
+    elseif n > 0 then msgs[#msgs + 1] = string.format("已新增 %d 個物品", n) end
+    if #msgs == 0 then return nil end
+    return table.concat(msgs, "；"), had_error
 end
 
 -- 查詢單一物品在 AE2 網路內的總數量。失敗回傳 nil, 錯誤訊息 (呼叫端不可當成 0 處理)
@@ -199,7 +347,7 @@ function sdlogic.release_stale_lock(monitor_items)
     local current = _G.current_global_task
     if not current then return end
     for _, info in ipairs(monitor_items) do
-        if info.label == current and info.mode_tag == "clone" then
+        if info.key == current and info.mode_tag == "clone" then
             return
         end
     end
@@ -219,6 +367,14 @@ function sdlogic.render_page1()
 end
 
 -- 處理第二頁：AE2 核心庫存盤點、佇列智慧調度與補貨下單
+-- 全域鎖持有者的顯示名稱
+local function holder_label(items)
+    for _, info in ipairs(items) do
+        if info.key == _G.current_global_task then return info.label end
+    end
+    return tostring(_G.current_global_task)
+end
+
 function sdlogic.render_page2()
     local ctx = main()
     local now_time = ctx.get_now_time()
@@ -260,6 +416,7 @@ function sdlogic.render_page2()
     -- 遍歷動態物品清單
     for idx, item_info in ipairs(monitor_items) do
         local item_name = item_info.label
+        local item_key = item_info.key
         local count = sdlogic.count_item(item_info, ctx.ae)
 
         -- 格式化儲存數量 (1M/1K)；查詢失敗顯示 ?
@@ -275,7 +432,7 @@ function sdlogic.render_page2()
 
         local status_msg = ""
         local item_cooldown = item_info.cooldown or ctx.default_cooldown
-        local req_handle = ctx.active_ae_requests[item_name]
+        local req_handle = ctx.active_ae_requests[item_key]
         local tag1, tag2, tag3 = 0, 0, 0
         
         -- 異步追蹤 AE2 訂單任務
@@ -286,13 +443,13 @@ function sdlogic.render_page2()
             if is_done_ok and is_canceled_ok and not is_done and not is_canceled then
                 tag3 = 1 -- 代表 AE 核心正在合成中
             else
-                ctx.active_ae_requests[item_name] = nil
-                ctx.last_order_time[item_name] = now_time + 60
+                ctx.active_ae_requests[item_key] = nil
+                ctx.last_order_time[item_key] = now_time + 60
                 tag3 = 0
             end
         end
         
-        local last_order = ctx.last_order_time[item_name] or 0
+        local last_order = ctx.last_order_time[item_key] or 0
         local time_passed = now_time - last_order
         local remaining = math.ceil(item_cooldown - time_passed)
         
@@ -317,7 +474,7 @@ function sdlogic.render_page2()
                 local priority = item_info.priority or 9 
                 
                 if count >= item_info.target_quantity then
-                    if _G.current_global_task == item_name then
+                    if _G.current_global_task == item_key then
                         --print("[調度中心] 高優先級物品已達標，解鎖全域通道: " .. item_name)
                         _G.current_global_task = nil
                         if component.isAvailable("modem") then
@@ -329,11 +486,11 @@ function sdlogic.render_page2()
                     tag1, tag2, tag3 = 0, 0, 0
                 else
                     if _G.current_global_task == nil then
-                        _G.current_global_task = item_name
+                        _G.current_global_task = item_key
                     else
                         local current_running_priority = 9
                         for _, check_info in ipairs(monitor_items) do
-                            if check_info.label == _G.current_global_task then
+                            if check_info.key == _G.current_global_task then
                                 current_running_priority = check_info.priority or 9
                                 break
                             end
@@ -341,14 +498,14 @@ function sdlogic.render_page2()
                         
                         if priority < current_running_priority then
                             --print(string.format("[權重插隊] 發現更高優先級物資！強制換單 [%s] -> [%s]", _G.current_global_task, item_name))
-                            _G.current_global_task = item_name
+                            _G.current_global_task = item_key
                             if component.isAvailable("modem") then
                                 component.modem.broadcast(201, "KEEP_ALIVE", target_circuit, item_info.target_quantity, count)
                             end
                         end
                     end
                     
-                    if _G.current_global_task == item_name then
+                    if _G.current_global_task == item_key then
                         ctx.gpu.setForeground(0x00FF00)
                         status_msg = string.format("[📡 複製中: Cnf %d | Prio %d]", target_circuit, priority)
                         tag1 = 5
@@ -360,7 +517,7 @@ function sdlogic.render_page2()
                         end
                     else
                         ctx.gpu.setForeground(0xFFAA00)
-                        status_msg = string.format("[⏳ 排隊中 (P%d) | 鎖定者: %s]", priority, usub(tostring(_G.current_global_task), 4))
+                        status_msg = string.format("[⏳ 排隊中 (P%d) | 鎖定者: %s]", priority, usub(holder_label(monitor_items), 4))
                         tag1 = 6
                         tag2 = 0
                     end
@@ -381,13 +538,13 @@ function sdlogic.render_page2()
                     local target_recipe = craftables[1]
                     local success_req, request_handle = pcall(target_recipe.request, item_info.target_once)
                     if success_req and request_handle then 
-                        ctx.last_order_time[item_name] = now_time
-                        ctx.active_ae_requests[item_name] = request_handle
+                        ctx.last_order_time[item_key] = now_time
+                        ctx.active_ae_requests[item_key] = request_handle
                         ctx.gpu.setForeground(0xFFEE00) 
                         status_msg = string.format("[🚀 已下單 +%d]", item_info.target_once)
                         tag1 = 1
                     else
-                        ctx.last_order_time[item_name] = now_time - item_cooldown + 30
+                        ctx.last_order_time[item_key] = now_time - item_cooldown + 30
                         ctx.gpu.setForeground(0xFF5555) 
                         status_msg = "[❌ AE拒絕下單/無原料]"
                         tag1 = 3
@@ -399,8 +556,8 @@ function sdlogic.render_page2()
                 end
             end
         else
-            if ctx.active_ae_requests[item_name] then ctx.active_ae_requests[item_name] = nil end
-            if _G.current_global_task == item_name then _G.current_global_task = nil end
+            if ctx.active_ae_requests[item_key] then ctx.active_ae_requests[item_key] = nil end
+            if _G.current_global_task == item_key then _G.current_global_task = nil end
             ctx.gpu.setForeground(count < 10 and 0xFF5555 or 0xFFFFFF)
             status_msg = "[✅庫存充裕安全]"
             tag1, tag2, tag3 = 0, 0, 0

@@ -82,6 +82,9 @@ local btn2 = { x = 35, y = 3, w = 25, h = 4, label = "   AE2 核心物資倉   "
 -- 第二頁專用：物品清單換頁鍵
 local btn_prev = { x = 65, y = 3, w = 14, h = 4, label = "◀ 上一頁" }
 local btn_next = { x = 81, y = 3, w = 14, h = 4, label = "下一頁 ▶" }
+-- 第二頁專用：即時掃描 database 並新增尚未登錄的物品
+local btn_scan = { x = 115, y = 3, w = 22, h = 4, label = "🔍 掃描新增物品" }
+local database_slots = 81            -- database 升級最大格數 (Tier 3)
 local items_per_page = 35               -- 第 16 列起到螢幕底部
 local list_page, list_pages = 1, 1
 
@@ -110,6 +113,8 @@ M.battery, M.jukebox = battery_comp, jukebox_comp
 M.energy_threshold, M.high_threshold = low_energy_threshold, high_energy_threshold
 M.query_port, M.relay_port = query_port, relay_port
 M.items_per_page = items_per_page
+M.database_slots = database_slots
+M.scan_message = nil     -- { text = "...", color = 0x... }，顯示在第二頁第 13 列
 M.list_page, M.list_pages = list_page, list_pages
 M.get_now_time = get_now_time
 
@@ -128,9 +133,22 @@ function M.draw_pager()
     end
     draw_btn(btn_prev, M.list_page > 1)
     draw_btn(btn_next, M.list_page < M.list_pages)
+    draw_btn(btn_scan, true)
     gpu.setBackground(0x000000)
     gpu.setForeground(0xFFFF00)
     gpu.set(btn_next.x + btn_next.w + 2, btn_prev.y + 1, string.format("第 %d / %d 頁      ", M.list_page, M.list_pages))
+    gpu.setForeground(0xFFFFFF)
+end
+
+-- 掃描結果訊息(第 13 列)
+function M.draw_scan_message()
+    if current_page ~= 2 then return end
+    gpu.setBackground(0x000000)
+    gpu.set(6, 13, string.rep(" ", 150))
+    if M.scan_message then
+        gpu.setForeground(M.scan_message.color or 0xFFFFFF)
+        gpu.set(6, 13, M.scan_message.text)
+    end
     gpu.setForeground(0xFFFFFF)
 end
 
@@ -174,6 +192,7 @@ local function init_page_background()
         gpu.set(15, 22, "║                                                                                         ║")
         gpu.set(15, 23, "╚═════════════════════════════════════════════════════════════════════════════════════════╝")
     elseif current_page == 2 then
+        M.draw_scan_message()
         gpu.setForeground(0x00FFFF)
         gpu.set(6, 11, "◆─────────────────────────────── AE2 AUTOMATED INVENTORY CONTROL PANEL ───────────────────────────────◆")
         if not ae then
@@ -242,7 +261,27 @@ local function switch_page(page_num)
     update_dynamic_data(true)
 end
 
--- 觸控處理：頁籤切換 + 第二頁的上一頁/下一頁
+-- 即時掃描 database，把還沒登錄的物品新增到 JSON，並更新畫面
+function M.scan_now()
+    local ok, n, added = pcall(sdlogic.scan_database)
+    if not ok then
+        M.scan_message = { text = "掃描失敗: " .. tostring(n), color = 0xFF5555 }
+    elseif not n then
+        M.scan_message = { text = "掃描失敗: " .. tostring(added), color = 0xFF5555 }
+    elseif n == 0 then
+        M.scan_message = { text = "掃描完成：沒有新增物品", color = 0xBBBBBB }
+    else
+        local shown = {}
+        for i = 1, math.min(#added, 5) do shown[#shown + 1] = added[i] end
+        local more = #added > 5 and string.format(" ...等 %d 個", #added) or ""
+        M.scan_message = { text = string.format("掃描完成：新增 %d 個物品 (%s%s)，預設為 monitor，請到設定檔設定補貨",
+            n, table.concat(shown, ", "), more), color = 0x00FF00 }
+    end
+    M.draw_scan_message()
+    update_dynamic_data(true)
+end
+
+-- 觸控處理：頁籤切換 + 第二頁的上一頁/下一頁/掃描
 function M.handle_touch(cx, cy)
     if is_clicked(cx, cy, btn1) and current_page ~= 1 then
         switch_page(1)
@@ -254,12 +293,21 @@ function M.handle_touch(cx, cy)
     elseif current_page == 2 and is_clicked(cx, cy, btn_next) and M.list_page < M.list_pages then
         M.list_page = M.list_page + 1
         update_dynamic_data(true)
+    elseif current_page == 2 and is_clicked(cx, cy, btn_scan) then
+        M.scan_now()
     end
 end
 
 function M.start()
     if timer_id or main_thread then return false, "服務已經在運行中" end
     if full_screen_addr then gpu.bind(full_screen_addr) end
+    -- 初始化：轉換舊格式並檢查 database 有沒有新增的物品
+    local init_ok, init_msg, init_err = pcall(sdlogic.init_config)
+    if not init_ok then
+        M.scan_message = { text = "初始化設定檔失敗: " .. tostring(init_msg), color = 0xFF5555 }
+    elseif init_msg then
+        M.scan_message = { text = init_msg, color = init_err and 0xFF5555 or 0x00FF00 }
+    end
     switch_page(1)
     sdquery.start()
 
