@@ -1,65 +1,29 @@
 -- 檔案路徑：sdapi.lua
-local fs = require("filesystem")
+-- 時間相關函式。參數(檔案路徑…)直接讀取主程式 touch_menu，不再用傳遞的方式。
+-- 設定檔載入 load_hybrid_config 已移到 sdlogic.lua。
 local io = require("io")
 local computer = require("computer")
 local internet = require("internet")
 
 local api = {}
 
-function api.load_hybrid_config(path, db_comp)
-    local items = {}
-    local fluids = {}
-    if not fs.exists(path) or not db_comp then return {}, {} end
-    local current_section = nil
-    for line in io.lines(path) do
-        line = line:gsub("[%c]", "")
-        if line ~= "" and not line:match("^#") then
-            if line:lower():match("%[items%]") then
-                current_section = "items"
-            elseif line:lower():match("%[fluids%]") then
-                current_section = "fluids"
-            elseif not line:match("^target_database") and not line:match("^%[settings%]") then
-                if current_section == "items" then
-                    local slot_s, min_s, req_s, cd_s, prio_s = line:match("^(%d+)=?(%d*)=?(%d*)=?(%d*)=?(%d*)$")
-                    if slot_s then
-                        local slot = tonumber(slot_s) or 0
-                        local min_stock = tonumber(min_s) or 0
-                        local req_qty = tonumber(req_s) or 0
-                        local cooldown = tonumber(cd_s) or 1
-                        local priority = tonumber(prio_s) or 9
-                        if slot > 0 then
-                            local db_success, item_data = pcall(db_comp.get, slot)
-                            if db_success and item_data and item_data.label then
-                                items[#items + 1] = {
-                                    name = item_data.label, 
-                                    min_stock = min_stock,
-                                    req_qty = req_qty,
-                                    cooldown = cooldown,
-                                    priority = priority
-                                }
-                            end
-                        end
-                    end
-                elseif current_section == "fluids" then
-                    local fluid_name = line:gsub("^%s*(.-)%s*$", "%1")
-                    fluids[#fluids + 1] = fluid_name
-                end
-            end
-        end
-    end
-    return items, fluids
-end
+-- 延遲載入主程式，避免與 touch_menu 載入時互相 require 造成循環
+local function main() return require("touch_menu") end
 
 function api.update_time()
-    local MY_SERVER_URL = "http://192.168.212.103:8080" 
-    local path = _G.time_file_path or "/mnt/4c8/realtime.txt"
+    local MY_SERVER_URL = "http://192.168.212.103:8080"
+    local path = main().realtime_path
     local result, response = pcall(internet.request, MY_SERVER_URL)
     if result and response then
         local html_content = ""
+        -- 讀取設有 5 秒上限，避免伺服器無回應時卡死計時器回呼
+        local deadline = computer.uptime() + 5
+        local read = (type(response) == "table" and type(response.read) == "function") and response.read or response
         repeat
-            local chunk = response.read()
+            local ok, chunk = pcall(read)
+            if not ok then chunk = nil end
             if chunk then html_content = html_content .. chunk end
-        until not chunk
+        until not chunk or computer.uptime() > deadline
         local raw_time = string.match(html_content, 'id="time">([^<]+)</span>')
         local raw_date = string.match(html_content, 'id="date">([^<]+)</span>')
         if raw_time and raw_date then
@@ -82,7 +46,7 @@ function api.get_days_in_month(month, year)
 end
 
 function api.local_tick_time(seconds_to_add)
-    local path = _G.time_file_path or "/mnt/4c8/realtime.txt"
+    local path = main().realtime_path
     local file = io.open(path, "r")
     local cur_date, cur_time = nil, nil
     if file then
@@ -129,7 +93,7 @@ function api.local_tick_time(seconds_to_add)
 end
 
 function api.read_saved_time()
-    local realtime_path = "/mnt/4c8/realtime.txt"
+    local realtime_path = main().realtime_path
     local file = io.open(realtime_path, "r")
     local file_date, file_time = "----- --:--", "--:--:--"
     if file then
