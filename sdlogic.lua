@@ -44,6 +44,46 @@ end
 sdlogic.fit = fit
 sdlogic.usub = usub
 
+-- ========================================================
+-- 【繪圖快取】gpu 的呼叫有每 tick 的次數上限，每次刷新都整頁重畫會拖慢；
+-- 只有「文字或顏色真的改變」的列才會重新畫。換頁/清螢幕時要呼叫 reset_draw_cache。
+-- ========================================================
+local draw_cache = {}
+
+function sdlogic.reset_draw_cache() draw_cache = {} end
+
+local function put(x, y, text, color)
+    local k = y * 1000 + x
+    local sig = tostring(color) .. ":" .. text
+    local c = draw_cache[k]
+    if c and c.sig == sig then return end
+    local gpu = main().gpu
+    gpu.setForeground(color)
+    gpu.set(x, y, text)
+    draw_cache[k] = { sig = sig, w = ulen(text), x = x, y = y }
+end
+
+-- 把 y1..y2 列中畫過的內容用空白蓋掉
+local function clear_rows(y1, y2)
+    local gpu = main().gpu
+    for _, c in pairs(draw_cache) do
+        if c.y >= y1 and c.y <= y2 and not c.blank then
+            gpu.set(c.x, c.y, string.rep(" ", c.w))
+            c.sig, c.blank = "blank", true
+        end
+    end
+end
+
+-- 電量數字：1.23GEU 這種好讀格式
+local UNITS = { "", "K", "M", "G", "T", "P", "E" }
+function sdlogic.format_eu(n)
+    if type(n) ~= "number" then return "?" end
+    local i, v = 1, math.abs(n)
+    while v >= 1000 and i < #UNITS do v = v / 1000; i = i + 1 end
+    if i == 1 then return string.format("%d EU", n) end
+    return string.format("%.2f%sEU", n / 1000 ^ (i - 1), UNITS[i])
+end
+
 
 -- ========================================================
 -- 【設定檔載入】ae_config.json (原本在 sdapi.load_hybrid_config)
@@ -51,8 +91,10 @@ sdlogic.usub = usub
 -- 初始化時與按下掃描鍵時，把 database 裡還沒登記的物品加進 JSON。
 -- ========================================================
 local MODES = { restock = true, clone = true, monitor = true }
-local parse_cache = { path = nil, mtime = nil, data = nil }
+local parse_cache = { path = nil, mtime = nil, data = nil, checked_at = nil }
+local built_cache = { data = nil, items = nil, errors = nil }
 local last_good = nil
+local last_log_text = nil
 
 -- JSON 的 null 視同沒填
 local function val(x)
@@ -62,12 +104,22 @@ end
 
 local function is_int(n) return type(n) == "number" and n == math.floor(n) end
 
--- 讀取並解析 JSON；檔案沒變 (lastModified 相同) 就沿用上次解析結果
+-- 讀取並解析 JSON。
+-- 快取兩層：(1) config_check_interval 秒內完全不碰檔案系統；(2) 之後只比對 lastModified，
+-- 檔案沒變就沿用上次解析結果。force=true 時一律重新讀檔(掃描/轉換要改檔前使用)。
 function sdlogic.parse_config_file(path, force)
+    local m = main()
+    local now = m.get_now_time and m.get_now_time() or 0
+    local interval = m.config_check_interval or 0
+    if not force and interval > 0 and parse_cache.data and parse_cache.path == path
+        and parse_cache.checked_at and now >= parse_cache.checked_at and now - parse_cache.checked_at < interval then
+        return parse_cache.data
+    end
     if not fs.exists(path) then return nil, "找不到設定檔 " .. tostring(path) end
     local ok, mtime = pcall(fs.lastModified, path)
     if not ok then mtime = nil end
     if not force and mtime and parse_cache.path == path and parse_cache.mtime == mtime and parse_cache.data then
+        parse_cache.checked_at = now
         return parse_cache.data
     end
     local f = io.open(path, "r")
@@ -79,14 +131,8 @@ function sdlogic.parse_config_file(path, force)
     if type(data) ~= "table" or type(data.items) ~= "table" then
         return nil, 'JSON 最上層必須是物件且含有 "items" 陣列'
     end
-    if not force then parse_cache.path, parse_cache.mtime, parse_cache.data = path, mtime, data end
+    if not force then parse_cache.path, parse_cache.mtime, parse_cache.data, parse_cache.checked_at = path, mtime, data, now end
     return data
-end
-
--- 物品的唯一識別 (name + damage + label)。所有狀態表(冷卻、訂單、全域鎖)都用它當鍵，
--- 同名(label)但不同物品不會互相干擾。
-function sdlogic.item_key(name, damage, label)
-    return tostring(name) .. "@" .. tostring(damage) .. "@" .. tostring(label)
 end
 
 -- 依 JSON 的 database 欄位(位址前綴)選擇資料庫元件；沒填或找不到就用主程式預設的 db
@@ -116,8 +162,9 @@ local function build_entry(raw, index, seen)
     local tag = label
     if type(name) ~= "string" or name == "" then return nil, tag .. ": name 必須是非空字串" end
     if not (is_int(damage) and damage >= 0) then return nil, tag .. ": damage 必須是 >=0 的整數" end
-    local key = sdlogic.item_key(name, damage, label)
-    if seen[key] then return nil, tag .. ": 重複的物品 (name/damage/label 相同)" end
+    -- AE2 搜尋只用 label，所以 label 就是物品的唯一識別 (也是冷卻/訂單/全域鎖的狀態鍵)
+    local key = label
+    if seen[key] then return nil, tag .. ": 重複的 label (AE2 只用 label 搜尋，同一個 label 只能登錄一次)" end
 
     local mode = val(raw.mode_tag)
     if not MODES[mode or ""] then return nil, tag .. ": mode_tag 必須是 restock / clone / monitor" end
@@ -172,11 +219,18 @@ function sdlogic.load_hybrid_config()
     else
         last_good = data
     end
-    local items, seen = {}, {}
+    -- 解析結果沒變就直接沿用已驗證好的項目，不必每次刷新重建
+    if built_cache.data == data and #errors == 0 then return built_cache.items, built_cache.errors end
+    local items, seen, build_errors = {}, {}, {}
     for i, raw in ipairs(data.items) do
         local entry, e = build_entry(raw, i, seen)
-        if entry then items[#items + 1] = entry else errors[#errors + 1] = e end
+        if entry then items[#items + 1] = entry else build_errors[#build_errors + 1] = e end
     end
+    if #errors == 0 then
+        built_cache.data, built_cache.items, built_cache.errors = data, items, build_errors
+        return items, build_errors
+    end
+    for _, e in ipairs(build_errors) do errors[#errors + 1] = e end
     return items, errors
 end
 
@@ -211,7 +265,8 @@ function sdlogic.save_config(path, data)
         if old then write_all(path, old) end
         return false, "寫入後驗證失敗，已還原舊檔"
     end
-    parse_cache.path, parse_cache.mtime, parse_cache.data = nil, nil, nil
+    parse_cache.path, parse_cache.mtime, parse_cache.data, parse_cache.checked_at = nil, nil, nil, nil
+    built_cache.data = nil
     return true
 end
 
@@ -264,7 +319,7 @@ function sdlogic.migrate_legacy_slots()
 end
 
 -- 掃描 database，把 JSON 裡還沒有的物品新增進去 (mode_tag = monitor，只顯示不補貨)。
--- 回傳 新增數量, 新增的 label 清單；失敗回傳 nil, 錯誤訊息。
+-- 回傳 新增數量, 新增的 label 清單, 因 label 重複而略過的清單；失敗回傳 nil, 錯誤訊息。
 function sdlogic.scan_database()
     local m = main()
     local path = m.config_file_path
@@ -274,27 +329,32 @@ function sdlogic.scan_database()
     if not db then return nil, "找不到 database 組件" end
     if type(data.items) ~= "table" then return nil, '設定檔缺少 "items" 陣列' end
 
+    -- AE2 只用 label 搜尋，所以以 label 判斷「是否已登錄」；
+    -- label 相同但 name/damage 不同的 database 物品無法同時登錄，會列在 skipped
     local known = {}
     for _, raw in ipairs(data.items) do
         if type(raw) == "table" then
-            local n, d, l = val(raw.name), val(raw.damage), val(raw.label)
-            if n and l then known[sdlogic.item_key(n, d or 0, l)] = true end
+            local l = val(raw.label)
+            if type(l) == "string" then known[l] = { name = val(raw.name), damage = val(raw.damage) } end
         end
     end
 
-    local added = {}
+    local added, skipped, skipped_seen = {}, {}, {}
     for slot = 1, (m.database_slots or 81) do
         local stack = db_stack(db, slot)
         if stack then
             local damage = stack.damage or 0
-            local key = sdlogic.item_key(stack.name, damage, stack.label)
-            if not known[key] then
-                known[key] = true
+            local have = known[stack.label]
+            if not have then
+                known[stack.label] = { name = stack.name, damage = damage }
                 data.items[#data.items + 1] = {
                     name = stack.name, damage = damage, label = stack.label,
                     mode_tag = "monitor", target_quantity = 0,
                 }
                 added[#added + 1] = stack.label
+            elseif (have.name ~= stack.name or have.damage ~= damage) and not skipped_seen[stack.label] then
+                skipped_seen[stack.label] = true
+                skipped[#skipped + 1] = stack.label
             end
         end
     end
@@ -302,7 +362,7 @@ function sdlogic.scan_database()
         local ok, e = sdlogic.save_config(path, data)
         if not ok then return nil, e end
     end
-    return #added, added
+    return #added, added, skipped
 end
 
 -- 初始化：先轉換舊格式，再掃描新增。回傳 訊息, 是否有錯誤 (沒事可做回傳 nil)
@@ -318,7 +378,7 @@ function sdlogic.init_config()
     return table.concat(msgs, "；"), had_error
 end
 
--- 查詢單一物品在 AE2 網路內的總數量。失敗回傳 nil, 錯誤訊息 (呼叫端不可當成 0 處理)
+-- 查詢單一物品(只用 label)在 AE2 網路內的總數量。失敗回傳 nil, 錯誤訊息 (呼叫端不可當成 0 處理)
 function sdlogic.count_item(entry, ae)
     ae = ae or main().ae
     if not ae then return nil, "找不到 ME 介面" end
@@ -326,19 +386,43 @@ function sdlogic.count_item(entry, ae)
     if not ok or type(items) ~= "table" then return nil, "AE2 查詢失敗" end
     local total = 0
     for _, it in ipairs(items) do
-        if it.label == entry.label
-            and (entry.name == nil or it.name == nil or it.name == entry.name)
-            and (entry.damage == nil or it.damage == nil or it.damage == entry.damage) then
-            total = total + (it.size or 0)
-        end
+        if it.label == entry.label then total = total + (it.size or 0) end
     end
     return total
 end
 
+-- 一次查完整份清單。query_mode: "filter" 每個 label 各查一次 getItemsInNetwork({label=...})；
+-- "full" 只呼叫一次 getItemsInNetwork() 再自己加總；"auto" 物品數超過 query_full_threshold 就用 full。
+-- 每次元件呼叫都會花掉至少 1 tick，物品多的時候 full 通常快很多。
+-- 回傳 counts(label → 數量；查詢失敗的 label 為 nil), 實際使用的模式
+function sdlogic.query_counts(items, ctx)
+    local mode = ctx.query_mode or "auto"
+    if mode == "auto" then mode = (#items > (ctx.query_full_threshold or 8)) and "full" or "filter" end
+    local counts = {}
+    if mode == "full" then
+        if ctx.ae then
+            local ok, all = pcall(ctx.ae.getItemsInNetwork)
+            if ok and type(all) == "table" then
+                local sums = {}
+                for _, it in ipairs(all) do
+                    if it.label then sums[it.label] = (sums[it.label] or 0) + (it.size or 0) end
+                end
+                for _, entry in ipairs(items) do counts[entry.label] = sums[entry.label] or 0 end
+            end
+        end
+    else
+        for _, entry in ipairs(items) do counts[entry.label] = sdlogic.count_item(entry, ctx.ae) end
+    end
+    return counts, mode
+end
+
 -- 測試用：清掉快取
 function sdlogic._reset_config_cache()
-    parse_cache.path, parse_cache.mtime, parse_cache.data = nil, nil, nil
+    parse_cache.path, parse_cache.mtime, parse_cache.data, parse_cache.checked_at = nil, nil, nil, nil
+    built_cache.data, built_cache.items, built_cache.errors = nil, nil, nil
     last_good = nil
+    last_log_text = nil
+    draw_cache = {}
 end
 
 -- 全域鎖持有者若已不在設定檔中，或不再是特殊複製模式，就強制解鎖，
@@ -358,12 +442,57 @@ function sdlogic.release_stale_lock(monitor_items)
 end
 
 -- 處理第一頁：系統時間顯示與微調
+-- 第一頁：網路上所有電池(multimachine.supercapacitor)的電量
 function sdlogic.render_page1()
     local ctx = main()
-    local file_time, file_date = sdapi.read_saved_time()
-    ctx.gpu.setForeground(0xFFFF00)
-    ctx.gpu.set(43, 19, file_time .. "        ")
-    ctx.gpu.set(43, 21, file_date .. "        ")
+    local force = ctx.battery_rescan_requested
+    ctx.battery_rescan_requested = false
+    local list, sum = sdapi.read_all_batteries(force)
+    local white, cyan, yellow, green, red, grey = 0xFFFFFF, 0x00FFFF, 0xFFEE00, 0x00FF00, 0xFF5555, 0xBBBBBB
+
+    local function level_color(pct)
+        if not pct then return grey end
+        if pct >= ctx.high_threshold then return green end
+        if pct >= ctx.energy_threshold then return yellow end
+        return red
+    end
+
+    put(6, 11, "◆─────────────────────────────── BATTERY MONITOR / 電池電量 ───────────────────────────────◆", cyan)
+    if #list == 0 then
+        put(6, 13, fit("  找不到電池：網路上沒有 getName() 含 " .. tostring(ctx.battery_name) .. " 的 gt_machine。", 120), yellow)
+        clear_rows(14, ctx.SCR_H)
+        return
+    end
+    if sum.total > 0 then
+        put(6, 13, fit(string.format("  共 %d 顆電池  |  合計 %s / %s  |  %.1f%%%s", sum.count,
+            sdlogic.format_eu(sum.stored), sdlogic.format_eu(sum.total), sum.pct,
+            sum.counted < sum.count and string.format("  (有 %d 顆無法讀取)", sum.count - sum.counted) or ""), 120),
+            level_color(sum.pct))
+    else
+        put(6, 13, fit(string.format("  共 %d 顆電池  |  無法讀取電量", sum.count), 120), red)
+    end
+    put(6, 14, "  # |位址  |    目前電量    |      總容量      |  比例  | 電量條", grey)
+    put(6, 15, "  ──+──────+────────────────+──────────────────+────────+──────────────────────", grey)
+
+    local per_page = ctx.SCR_H - 15
+    local shown = math.min(#list, per_page)
+    for idx = 1, shown do
+        local b = list[idx]
+        local y = 15 + idx
+        if idx == per_page and #list > per_page then
+            put(6, y, fit(string.format("  … 另有 %d 顆未顯示", #list - per_page + 1), 100), yellow)
+        elseif b.err then
+            put(6, y, fit(string.format(" %02d |%s| %s", idx, fit(b.address:sub(1, 5), 6), b.err), 100), red)
+        else
+            local stored_txt = b.stored and sdlogic.format_eu(b.stored) or "?"
+            local total_txt = b.total and sdlogic.format_eu(b.total) or "?"
+            local filled = math.floor(b.pct / 100 * 20 + 0.5)
+            filled = math.max(0, math.min(20, filled))
+            put(6, y, string.format(" %02d |%s|%15s |%17s |%6.1f%% | ", idx, fit(b.address:sub(1, 5), 6), stored_txt, total_txt, b.pct)
+                .. string.rep("█", filled) .. string.rep("░", 20 - filled) .. "  ", level_color(b.pct))
+        end
+    end
+    clear_rows(15 + shown + 1, ctx.SCR_H)
 end
 
 -- 處理第二頁：AE2 核心庫存盤點、佇列智慧調度與補貨下單
@@ -377,30 +506,29 @@ end
 
 function sdlogic.render_page2()
     local ctx = main()
-    local now_time = ctx.get_now_time()
-    -- 1. 即時重新解析設定檔
+    local t_start = ctx.get_now_time()
+    local now_time = t_start
+    -- 1. 讀取設定 (有快取：config_check_interval 秒內不碰檔案)
     local monitor_items, cfg_errors = sdlogic.load_hybrid_config()
-    
-    -- 如果設定檔是空的或不存在，清除下方舊殘影並給予提示
+    local t_cfg = ctx.get_now_time()
+
     sdlogic.release_stale_lock(monitor_items)
+
+    -- 設定檔錯誤提示 (第 12 列)
+    if cfg_errors[1] then
+        local more = #cfg_errors > 1 and string.format(" (另有 %d 項)", #cfg_errors - 1) or ""
+        put(6, 12, fit("⚠️ " .. cfg_errors[1] .. more, 150), 0xFF5555)
+    else
+        put(6, 12, string.rep(" ", 150), 0xFFFFFF)
+    end
+
+    -- 如果設定檔是空的或不存在，提示一下
     if #monitor_items == 0 then
         ctx.list_page, ctx.list_pages = 1, 1
         ctx.draw_pager()
-        ctx.gpu.setForeground(0xFFEE00)
-        if cfg_errors[1] then ctx.gpu.set(6, 19, "  " .. fit(cfg_errors[1], 120)) end
-        ctx.gpu.set(6, 17, " ⚠️ 目前 ae_config.json 為空、格式錯誤或硬碟未正確掛載。                        ")
+        put(6, 17, fit(" ⚠️ 目前 ae_config.json 為空、格式錯誤或硬碟未正確掛載。", 90), 0xFFEE00)
+        clear_rows(18, ctx.SCR_H)
         return
-    end
-    
-    -- 擦除舊數據，防止更換更短的設定檔時產生文字殘影
-    ctx.gpu.fill(1, 16, ctx.SCR_W, ctx.SCR_H - 15, " ")
-
-    -- 設定檔錯誤提示(第 12 列；清空舊內容)
-    ctx.gpu.set(6, 12, string.rep(" ", 150))
-    if cfg_errors[1] then
-        ctx.gpu.setForeground(0xFF5555)
-        local more = #cfg_errors > 1 and string.format(" (另有 %d 項)", #cfg_errors - 1) or ""
-        ctx.gpu.set(6, 12, fit("⚠️ " .. cfg_errors[1] .. more, 150))
     end
 
     -- 分頁：全部物品照常運算與下單，但畫面只顯示目前這一頁
@@ -411,13 +539,18 @@ function sdlogic.render_page2()
     ctx.draw_pager()
     local first_idx = (ctx.list_page - 1) * per_page + 1
     local last_idx = first_idx + per_page - 1
-    
+
     local log_lines = {}
+
+    -- 2. 查詢 AE2 庫存 (只用 label)
+    local counts, query_mode = sdlogic.query_counts(monitor_items, ctx)
+    local t_ae = ctx.get_now_time()
+
     -- 遍歷動態物品清單
     for idx, item_info in ipairs(monitor_items) do
         local item_name = item_info.label
         local item_key = item_info.key
-        local count = sdlogic.count_item(item_info, ctx.ae)
+        local count = counts[item_name]
 
         -- 格式化儲存數量 (1M/1K)；查詢失敗顯示 ?
         local count_str = "?"
@@ -431,6 +564,7 @@ function sdlogic.render_page2()
         end
 
         local status_msg = ""
+        local color = 0xFFFFFF
         local item_cooldown = item_info.cooldown or ctx.default_cooldown
         local req_handle = ctx.active_ae_requests[item_key]
         local tag1, tag2, tag3 = 0, 0, 0
@@ -464,7 +598,7 @@ function sdlogic.render_page2()
         
         if count == nil then
             -- AE2 查詢失敗時不可當成 0 個去下單
-            ctx.gpu.setForeground(0xFF5555)
+            color = 0xFF5555
             status_msg = "[⚠️ AE查詢失敗]"
             tag1 = 7
         elseif is_special_mode or (item_info.mode_tag == "restock" and count < item_info.target_quantity) then
@@ -481,7 +615,7 @@ function sdlogic.render_page2()
                             component.modem.broadcast(201, "STOP_CLONE")
                         end
                     end
-                    ctx.gpu.setForeground(0xFFFFFF)
+                    color = 0xFFFFFF
                     status_msg = "[✅庫存充裕安全]"
                     tag1, tag2, tag3 = 0, 0, 0
                 else
@@ -506,7 +640,7 @@ function sdlogic.render_page2()
                     end
                     
                     if _G.current_global_task == item_key then
-                        ctx.gpu.setForeground(0x00FF00)
+                        color = 0x00FF00
                         status_msg = string.format("[📡 複製中: Cnf %d | Prio %d]", target_circuit, priority)
                         tag1 = 5
                         tag2 = target_circuit
@@ -516,7 +650,7 @@ function sdlogic.render_page2()
                             component.modem.broadcast(201, "KEEP_ALIVE", target_circuit, item_info.target_quantity, count)
                         end
                     else
-                        ctx.gpu.setForeground(0xFFAA00)
+                        color = 0xFFAA00
                         status_msg = string.format("[⏳ 排隊中 (P%d) | 鎖定者: %s]", priority, usub(holder_label(monitor_items), 4))
                         tag1 = 6
                         tag2 = 0
@@ -525,11 +659,11 @@ function sdlogic.render_page2()
                 
             -- 狀況乙：常規 AE2 補貨邏輯
             elseif tag3 == 1 then
-                ctx.gpu.setForeground(0x55AFFF) 
+                color = 0x55AFFF 
                 status_msg = "[🛠 訂單合成中...]"
                 tag1 = 2; tag2 = 999
             elseif last_order > now_time or time_passed < item_cooldown then
-                ctx.gpu.setForeground(0x55AFFF)
+                color = 0x55AFFF
                 status_msg = string.format("[🛠 補貨冷卻: %ds]", remaining)
                 tag1 = 2; tag2 = remaining
             else
@@ -540,17 +674,17 @@ function sdlogic.render_page2()
                     if success_req and request_handle then 
                         ctx.last_order_time[item_key] = now_time
                         ctx.active_ae_requests[item_key] = request_handle
-                        ctx.gpu.setForeground(0xFFEE00) 
+                        color = 0xFFEE00 
                         status_msg = string.format("[🚀 已下單 +%d]", item_info.target_once)
                         tag1 = 1
                     else
                         ctx.last_order_time[item_key] = now_time - item_cooldown + 30
-                        ctx.gpu.setForeground(0xFF5555) 
+                        color = 0xFF5555 
                         status_msg = "[❌ AE拒絕下單/無原料]"
                         tag1 = 3
                     end
                 else
-                    ctx.gpu.setForeground(0xFF5555)
+                    color = 0xFF5555
                     status_msg = "[⚠️ 未在AE中找到配方]"
                     tag1 = 4
                 end
@@ -558,30 +692,46 @@ function sdlogic.render_page2()
         else
             if ctx.active_ae_requests[item_key] then ctx.active_ae_requests[item_key] = nil end
             if _G.current_global_task == item_key then _G.current_global_task = nil end
-            ctx.gpu.setForeground(count < 10 and 0xFF5555 or 0xFFFFFF)
+            color = count < 10 and 0xFF5555 or 0xFFFFFF
             status_msg = "[✅庫存充裕安全]"
             tag1, tag2, tag3 = 0, 0, 0
         end
         
-        -- 渲染至螢幕
+        -- 渲染至螢幕 (只畫改變的列)
         local row_pos = 15 + (idx - first_idx + 1)
         if idx >= first_idx and idx <= last_idx and row_pos <= ctx.SCR_H then
-            ctx.gpu.set(6, row_pos, string.format("  [%02d]|", idx) .. fit(item_name, 35) ..
-                string.format("|%11s |", count_str) .. fit(status_msg, 28) .. "      ")
+            put(6, row_pos, string.format("  [%02d]|", idx) .. fit(item_name, 35) ..
+                string.format("|%11s |", count_str) .. fit(status_msg, 28) .. "      ", color)
         end
-        
+
         -- 快照紀錄
         table.insert(log_lines, string.format("%s=%d=%d=%d", item_name, tag1, tag2, tag3))
     end
     
-    -- 覆蓋寫入狀態文本
-    pcall(function()
-        local f = io.open(ctx.log_file_path, "w")
-        if f then
-            for _, log_line in ipairs(log_lines) do f:write(log_line .. "\n") end
-            f:close()
-        end
-    end)
+    -- 清掉這一頁沒有用到的下方列 (清單縮短時)
+    local shown = math.max(0, math.min(last_idx, #monitor_items) - first_idx + 1)
+    clear_rows(15 + shown + 1, ctx.SCR_H)
+
+    -- 覆蓋寫入狀態文本：內容沒變就不寫檔，少一次檔案系統操作
+    local log_text = table.concat(log_lines, "\n") .. "\n"
+    if log_text ~= last_log_text then
+        local ok_log = pcall(function()
+            local f = io.open(ctx.log_file_path, "w")
+            if f then
+                f:write(log_text)
+                f:close()
+            else
+                error("open failed")
+            end
+        end)
+        if ok_log then last_log_text = log_text end
+    end
+
+    -- 效能讀數 (第 10 列)：方便判斷慢在哪裡。單位是秒(遊戲 tick 換算)
+    local t_end = ctx.get_now_time()
+    ctx.perf = { total = t_end - t_start, cfg = t_cfg - t_start, ae = t_ae - t_cfg, mode = query_mode, n = #monitor_items }
+    put(6, 10, fit(string.format("刷新耗時 %.2fs (設定 %.2f / AE2 %.2f / 其他 %.2f)  查詢模式: %s  物品: %d",
+        ctx.perf.total, ctx.perf.cfg, ctx.perf.ae, ctx.perf.total - ctx.perf.cfg - ctx.perf.ae, query_mode, #monitor_items), 110), 0x777777)
 end
 
 -- ========================================================

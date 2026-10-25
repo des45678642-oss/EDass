@@ -10,7 +10,8 @@ local function test(name, fn)
     -- each test starts from clean globals/mocks
     _G.current_global_task = nil
     Main = {
-        realtime_path = TMP_DIR .. "/realtime.txt",
+        battery_name = "multimachine.supercapacitor", battery_rescan_interval = 60,
+        config_check_interval = 0, query_mode = "auto", query_full_threshold = 8,
         config_file_path = TMP_DIR .. "/ae_config.json",
         log_file_path = TMP_DIR .. "/ae_log.txt",
         default_cooldown = 600, SCR_W = 160, SCR_H = 50,
@@ -61,9 +62,10 @@ component.invoke = function() end
 package.loaded.component = component
 package.loaded.computer = { uptime = function() return uptime end }
 local mtimes = {}
+local fs_calls = { exists = 0, lastModified = 0 }
 package.loaded.filesystem = {
-    exists = function(p) local f = io.open(p, "r"); if f then f:close(); return true end return false end,
-    lastModified = function(p) return mtimes[p] end,
+    exists = function(p) fs_calls.exists = fs_calls.exists + 1; local f = io.open(p, "r"); if f then f:close(); return true end return false end,
+    lastModified = function(p) fs_calls.lastModified = fs_calls.lastModified + 1; return mtimes[p] end,
 }
 package.loaded.internet = { request = function() error("no network in tests") end }
 local listeners = {}
@@ -89,9 +91,9 @@ local function cfg(json_text) write(Main.config_file_path, json_text) end
 
 local function make_gpu()
     local g = { sets = {}, calls = {} }
-    function g.set(x, y, s) g.sets[#g.sets + 1] = { x = x, y = y, s = s } end
+    function g.set(x, y, s) g.sets[#g.sets + 1] = { x = x, y = y, s = s, fg = g.fg } end
     function g.fill() end
-    function g.setForeground() end
+    function g.setForeground(c) g.fg = c end
     function g.setBackground() end
     function g.setResolution() g.calls[#g.calls + 1] = "setResolution" end
     function g.bind() g.calls[#g.calls + 1] = "bind" end
@@ -107,7 +109,7 @@ local function row_text(gpu, y)
 end
 
 -- config item helpers: entries carry name/damage/label (no database needed)
-local function key_of(label) return "mod:" .. label .. "@0@" .. label end
+local function key_of(label) return label end   -- state key == label (AE2 searches by label only)
 local function entry(label, mode, extra)
     local t = { name = "mod:" .. label, damage = 0, label = label, mode_tag = mode }
     for k, v in pairs(extra or {}) do t[k] = v end
@@ -234,16 +236,16 @@ test("config: bad entries are skipped with an error, good ones still load", func
     for _, e in ipairs(errs) do truthy(type(e) == "string" and e ~= "") end
 end)
 
-test("config: same label with different name/damage are separate items; exact duplicates are flagged", function()
+test("config: label is the identity - a second entry with the same label is flagged", function()
     cfg([[{"items":[
         {"name":"a:x","damage":0,"label":"Iron","mode_tag":"monitor"},
         {"name":"b:x","damage":0,"label":"Iron","mode_tag":"monitor"},
         {"name":"a:x","damage":1,"label":"Iron","mode_tag":"monitor"},
-        {"name":"a:x","damage":0,"label":"Iron","mode_tag":"monitor"}
+        {"name":"a:y","damage":0,"label":"Iron Dust","mode_tag":"monitor"}
     ]}]])
     local items, errs = sdlogic.load_hybrid_config()
-    eq(#items, 3); eq(#errs, 1); truthy(errs[1]:find("重複", 1, true))
-    truthy(items[1].key ~= items[2].key and items[1].key ~= items[3].key)
+    eq(#items, 2); eq(#errs, 2); truthy(errs[1]:find("label", 1, true))
+    eq(items[1].key, "Iron"); eq(items[2].label, "Iron Dust")
 end)
 
 test("config: legacy entry with only a slot is reported as 'not migrated yet'", function()
@@ -279,16 +281,16 @@ test("config: unchanged file is not re-parsed (lastModified cache)", function()
     eq(#sdlogic.load_hybrid_config(), 0, "re-read after mtime change")
 end)
 
-test("count_item: filtered query; name+damage guard against label collisions", function()
+test("count_item: label-only, filtered query; failures give nil + message", function()
     local seen
     local ae = { getItemsInNetwork = function(filter) seen = filter; return {
         { label = "Iron", name = "minecraft:iron_ingot", damage = 0, size = 100 },
-        { label = "Iron", name = "other:iron_ingot", damage = 0, size = 50 },
-        { label = "Iron", name = "minecraft:iron_ingot", damage = 3, size = 7 },
+        { label = "Iron", name = "other:iron_ingot", damage = 3, size = 50 },
+        { label = "Iron Dust", name = "x", damage = 0, size = 7 },
         { label = "Iron", name = "minecraft:iron_ingot", damage = 0, size = 23 },
     } end }
-    local n = sdlogic.count_item({ name = "minecraft:iron_ingot", damage = 0, label = "Iron" }, ae)
-    eq(n, 123); eq(seen.label, "Iron")
+    local n = sdlogic.count_item({ name = "ignored", damage = 99, label = "Iron" }, ae)
+    eq(n, 173, "name/damage do not take part in the search"); eq(seen.label, "Iron"); eq(seen.name, nil); eq(seen.damage, nil)
     local nothing, err = sdlogic.count_item({ label = "Iron" }, { getItemsInNetwork = function() error("boom") end })
     eq(nothing, nil); truthy(err)
     eq((sdlogic.count_item({ label = "Iron" }, nil)), nil)
@@ -321,10 +323,14 @@ test("scan: running it twice adds nothing the second time", function()
     eq(#sdlogic.load_hybrid_config(), 1)
 end)
 
-test("scan: identity is name+damage+label (a different damage or label is a new item)", function()
-    Main.db = db_with({ [1] = stack("a:x", 0, "Iron"), [2] = stack("a:x", 1, "Iron"), [3] = stack("a:x", 0, "Iron Dust") })
+test("scan: identity is the label; same label with other name/damage is reported as skipped", function()
+    Main.db = db_with({ [1] = stack("a:x", 0, "Iron"), [2] = stack("a:x", 1, "Iron"), [3] = stack("a:x", 0, "Iron Dust"), [4] = stack("b:y", 0, "Iron") })
     cfg_items({ entry("Iron", "monitor", { name = "a:x" }) })
-    eq((sdlogic.scan_database()), 2)
+    local n, added, skipped = sdlogic.scan_database()
+    eq(n, 1); eq(added[1], "Iron Dust")
+    eq(#skipped, 1); eq(skipped[1], "Iron", "reported once")
+    local _, errs = sdlogic.load_hybrid_config()
+    eq(#errs, 0, "scan never creates duplicate labels")
 end)
 
 test("scan: duplicates inside the database and unusable stacks are ignored", function()
@@ -429,68 +435,6 @@ test("the repo's real ae_config.json (slot format) migrates cleanly on first sta
     for i = #before.items + 1, #first do eq(first[i].mode_tag, "monitor") end
 end)
 
--- ========== sdapi: clock ==========
-test("days in month incl. leap years", function()
-    eq(sdapi.get_days_in_month(2, 2024), 29); eq(sdapi.get_days_in_month(2, 2100), 28)
-    eq(sdapi.get_days_in_month(2, 2000), 29); eq(sdapi.get_days_in_month(12, 2026), 31)
-end)
-
-test("clock tick: second/minute/hour rollover", function()
-    write(Main.realtime_path, "date=2026-10-24\ntime=23:59:59\ntype=net\n")
-    sdapi.local_tick_time(1)
-    local t, d = sdapi.read_saved_time()
-    eq(t, "00:00:00"); eq(d, "2026-10-25")
-end)
-
-test("clock tick: month and year rollover, leap day", function()
-    write(Main.realtime_path, "date=2026-12-31\ntime=23:59:59\n")
-    sdapi.local_tick_time(1)
-    local t, d = sdapi.read_saved_time(); eq(d, "2027-01-01"); eq(t, "00:00:00")
-    write(Main.realtime_path, "date=2024-02-28\ntime=23:59:59\n")
-    sdapi.local_tick_time(1)
-    t, d = sdapi.read_saved_time(); eq(d, "2024-02-29")
-end)
-
-test("read_saved_time honours Main.realtime_path", function()
-    write(TMP_DIR .. "/other_time.txt", "date=2030-01-02\ntime=03:04:05\n")
-    Main.realtime_path = TMP_DIR .. "/other_time.txt"
-    local t, d = sdapi.read_saved_time()
-    eq(t, "03:04:05"); eq(d, "2030-01-02")
-end)
-
-test("read_saved_time fallback placeholders when file missing", function()
-    Main.realtime_path = TMP_DIR .. "/does_not_exist.txt"
-    local t = sdapi.read_saved_time()
-    eq(t, "--:--:--")
-end)
-
-test("update_time survives network failure (no throw, file untouched)", function()
-    write(Main.realtime_path, "date=2026-01-01\ntime=00:00:00\ntype=calc\n")
-    sdapi.update_time()
-    truthy(read(Main.realtime_path):find("type=calc", 1, true))
-end)
-
-test("update_time parses server HTML (table-style response)", function()
-    local chunks = { '<span id="time">12:34:56</span>', '<span id="date">2026-10-24</span>' }
-    local i = 0
-    package.loaded.internet.request = function()
-        return { read = function() i = i + 1; return chunks[i] end }
-    end
-    write(Main.realtime_path, "")
-    sdapi.update_time()
-    local t, d = sdapi.read_saved_time()
-    eq(t, "12:34:56"); eq(d, "2026-10-24")
-    package.loaded.internet.request = function() error("no network in tests") end
-end)
-
-test("update_time gives up after the deadline instead of hanging", function()
-    package.loaded.internet.request = function()
-        return { read = function() uptime = uptime + 3; return "x" end }  -- never ends
-    end
-    sdapi.update_time()   -- must return
-    package.loaded.internet.request = function() error("no network in tests") end
-end)
-
 -- ========== sdlogic: text helpers ==========
 test("fit pads/truncates by characters, never splits UTF-8", function()
     eq(sdlogic.fit("鐵錠", 5), "鐵錠   ")
@@ -569,7 +513,7 @@ test("restock places an order when cooldown elapsed and stock is low", function(
     truthy(read(ctx.log_file_path):find("Iron=1=0=0", 1, true))
 end)
 
-test("same label, different item: cooldown/orders are tracked separately", function()
+test("duplicate label in the config: only the first entry is active (one order, error shown)", function()
     cfg([[{"items":[
         {"name":"a:x","damage":0,"label":"Iron","mode_tag":"restock","target_quantity":100,"target_once":10},
         {"name":"b:x","damage":0,"label":"Iron","mode_tag":"restock","target_quantity":100,"target_once":20}]}]])
@@ -577,7 +521,8 @@ test("same label, different item: cooldown/orders are tracked separately", funct
     local requests = {}
     ctx.ae.getCraftables = function() return { { request = function(n) requests[#requests + 1] = n; return { isDone = function() return false end, isCanceled = function() return false end } end } } end
     render(ctx, 5000)
-    eq(#requests, 2, "second item must not be blocked by the first one's cooldown")
+    eq(#requests, 1); eq(requests[1], 10)
+    truthy(row_text(ctx.gpu, 12):find("重複的 label", 1, true))
 end)
 
 test("no order when stock >= target_quantity", function()
@@ -735,7 +680,7 @@ test("query: returns the AE count for a registered label", function()
     eq(#m.sent, 3)
     eq(m.sent[1][1], "UUID-X"); eq(m.sent[1][2], 777); eq(m.sent[1][3], "AE_QUERY_REPLY")
     local a = body(m, 1)
-    eq(a.id, "r1"); eq(a.key, "Iron"); eq(a.ok, true); eq(a.count, 123); eq(a.name, "mod:Iron"); eq(a.damage, 0)
+    eq(a.id, "r1"); eq(a.key, "Iron"); eq(a.ok, true); eq(a.count, 123); eq(a.name, nil, "label-only replies")
     eq(body(m, 2).count, 9)
     eq(m.sent[3][3], "AE_QUERY_DONE"); eq(body(m, 3).n, 2)
 end)
@@ -757,15 +702,13 @@ test("query: unregistered label and AE failure report errors, not crashes", func
     eq(body(m, 1).ok, false)
 end)
 
-test("query: same label registered twice (different name) -> one reply each", function()
-    cfg([[{"items":[
-        {"name":"a:x","damage":0,"label":"Iron","mode_tag":"monitor"},
-        {"name":"b:x","damage":0,"label":"Iron","mode_tag":"monitor"}]}]])
+test("query: counts by label only (other name/damage with the same label are included)", function()
+    cfg_items({ entry("Iron", "monitor") })
     local ctx = make_ctx()
-    ctx.ae.getItemsInNetwork = function() return { { label = "Iron", name = "a:x", damage = 0, size = 5 }, { label = "Iron", name = "b:x", damage = 0, size = 7 } } end
+    ctx.ae.getItemsInNetwork = function() return { { label = "Iron", name = "a:x", damage = 0, size = 5 }, { label = "Iron", name = "b:x", damage = 2, size = 7 } } end
     local m = fake_modem()
     sdquery.process(m, { id = "r5", reply_to = "U", reply_port = 1, keys = { "Iron" } })
-    eq(#m.sent, 3); eq(body(m, 1).count, 5); eq(body(m, 2).count, 7)
+    eq(#m.sent, 2); eq(body(m, 1).count, 12)
 end)
 
 test("query: via relay -> FORWARD_CMD with only 5 parts (fits the 8-part limit)", function()
@@ -808,6 +751,332 @@ test("query: modem_message handler only answers AE_QUERY on query_port with vali
     component.proxy = saved
 end)
 
+
+-- ========== batteries (page 1) ==========
+local function fake_battery(name, lines, opts)
+    opts = opts or {}
+    local calls = { getName = 0, sensor = 0 }
+    return {
+        calls = calls,
+        getName = function() calls.getName = calls.getName + 1; if opts.name_error then error("no name") end; return name end,
+        getSensorInformation = function() calls.sensor = calls.sensor + 1; if opts.sensor_error then error("offline") end; return lines end,
+    }
+end
+local function install_machines(machines)
+    listings = {}
+    for addr, m in pairs(machines) do listings[addr] = "gt_machine" end
+    local saved = component.proxy
+    component.proxy = function(addr) return machines[addr] or { address = addr } end
+    return function() component.proxy = saved; listings = {} end
+end
+local LSC = "multimachine.supercapacitor"
+
+test("sensor parse: separate Stored / Total lines with commas and colour codes", function()
+    local info = assert(sdapi.parse_sensor({ "Operational Data:", "\194\167aEU Stored: \194\167f1,500,000,000 EU", "\194\167bTotal Capacity: 2,000,000,000 EU", "Used Capacity: 75.0%" }))
+    eq(info.stored, 1.5e9); eq(info.total, 2e9); eq(info.pct, 75.0)
+end)
+
+test("sensor parse: scientific notation in every spelling", function()
+    for _, pair in ipairs({ { "1.5E10", 1.5e10 }, { "1.5e10", 1.5e10 }, { "1.5E+10", 1.5e10 }, { "2E9", 2e9 }, { "9.223372036854775807E18", 9.223372036854775807e18 } }) do
+        local info = assert(sdapi.parse_sensor({ "EU Stored: " .. pair[1] .. " EU", "Total Capacity: 9.3E18 EU" }), pair[1])
+        eq(info.stored, pair[2], pair[1])
+    end
+end)
+
+test("sensor parse: one line 'Stored/Total: a / b' (also with sci notation)", function()
+    local info = assert(sdapi.parse_sensor({ "EU Stored/Total Capacity: 1.0E9 / 4,000,000,000" }))
+    eq(info.stored, 1e9); eq(info.total, 4e9); eq(info.pct, 25.0)
+end)
+
+test("sensor parse: only a percentage, garbage, zero total, wrong type", function()
+    local info = assert(sdapi.parse_sensor({ "Used Capacity: 45.5%" }))
+    eq(info.pct, 45.5); eq(info.stored, nil)
+    eq((sdapi.parse_sensor({ "hello", "world" })), nil)
+    eq((sdapi.parse_sensor({ "EU Stored: 0", "Total Capacity: 0" })), nil)
+    eq((sdapi.parse_sensor("nope")), nil)
+    eq((sdapi.parse_sensor({})), nil)
+    local over = assert(sdapi.parse_sensor({ "EU Stored: 5E9", "Total Capacity: 4E9" }))
+    eq(over.pct, 100, "percentage is capped")
+end)
+
+test("numbers_in: thousands separators, sci notation, several numbers", function()
+    local n = sdapi.numbers_in("1,234,567 / 2.5E3 / 7 EU")
+    eq(n[1], 1234567); eq(n[2], 2500); eq(n[3], 7); eq(#n, 3)
+end)
+
+test("find_batteries: only gt_machines whose getName() is multimachine.supercapacitor", function()
+    sdapi._reset_cache()
+    local restore = install_machines({
+        ["bbbb"] = fake_battery(LSC, {}), ["aaaa"] = fake_battery(LSC, {}),
+        ["cccc"] = fake_battery("multimachine.blastfurnace", {}), ["dddd"] = fake_battery(nil, {}, { name_error = true }),
+    })
+    local list = sdapi.find_batteries(true)
+    restore()
+    eq(#list, 2); eq(list[1].address, "aaaa"); eq(list[2].address, "bbbb", "sorted by address")
+end)
+
+test("find_batteries: result is cached until battery_rescan_interval or a forced rescan", function()
+    sdapi._reset_cache()
+    local m = fake_battery(LSC, {})
+    local restore = install_machines({ ["aaaa"] = m })
+    Main.now = 100
+    sdapi.find_batteries(); sdapi.find_batteries()
+    eq(m.calls.getName, 1, "second call served from cache")
+    Main.now = 130; sdapi.find_batteries()
+    eq(m.calls.getName, 1, "still inside the 60s interval")
+    Main.now = 161; sdapi.find_batteries()
+    eq(m.calls.getName, 2, "rescanned after the interval")
+    sdapi.find_batteries(true)
+    eq(m.calls.getName, 3, "forced rescan")
+    restore()
+end)
+
+test("read_all_batteries: one broken battery does not break the others; summary only counts readable ones", function()
+    sdapi._reset_cache()
+    local restore = install_machines({
+        ["aaaa"] = fake_battery(LSC, { "EU Stored: 1E9", "Total Capacity: 4E9" }),
+        ["bbbb"] = fake_battery(LSC, nil, { sensor_error = true }),
+        ["cccc"] = fake_battery(LSC, { "EU Stored: 3E9", "Total Capacity: 4E9" }),
+        ["dddd"] = fake_battery(LSC, { "nothing useful" }),
+    })
+    local list, sum = sdapi.read_all_batteries(true)
+    restore()
+    eq(#list, 4); eq(list[2].err, "讀取失敗"); truthy(list[4].err)
+    eq(sum.count, 4); eq(sum.counted, 2); eq(sum.stored, 4e9); eq(sum.total, 8e9); eq(sum.pct, 50.0)
+end)
+
+test("format_eu: readable units", function()
+    eq(sdlogic.format_eu(999), "999 EU"); eq(sdlogic.format_eu(1500), "1.50KEU")
+    eq(sdlogic.format_eu(1.5e9), "1.50GEU"); eq(sdlogic.format_eu(9.2e18), "9.20EEU"); eq(sdlogic.format_eu(nil), "?")
+end)
+
+test("page 1 shows every battery plus the total, and no clock any more", function()
+    sdapi._reset_cache()
+    local restore = install_machines({
+        ["aaaa1111"] = fake_battery(LSC, { "EU Stored: 3E9", "Total Capacity: 4E9" }),
+        ["bbbb2222"] = fake_battery(LSC, { "EU Stored: 1E9", "Total Capacity: 4E9" }),
+        ["cccc3333"] = fake_battery(LSC, { "EU Stored: 0.5E9", "Total Capacity: 4E9" }),
+        ["dddd4444"] = fake_battery("other.machine", {}),
+    })
+    local ctx = make_ctx()
+    sdlogic.render_page1()
+    restore()
+    local all = {}
+    for _, st in ipairs(ctx.gpu.sets) do all[#all + 1] = st.s end
+    local text = table.concat(all, "\n")
+    truthy(text:find("共 3 顆電池", 1, true), "summary")
+    truthy(text:find("4.50GEU / 12.00GEU", 1, true), "total stored / total capacity: " .. text)
+    truthy(text:find("37.5%", 1, true))
+    truthy(not text:find("REALWORLD", 1, true) and not text:find("TIME", 1, true) and not text:find("DATE", 1, true), "clock removed")
+    local r16, r17, r18 = row_text(ctx.gpu, 16), row_text(ctx.gpu, 17), row_text(ctx.gpu, 18)
+    truthy(r16:find("aaaa1", 1, true) and r16:find("75.0%", 1, true) and r16:find("3.00GEU", 1, true))
+    truthy(r17:find("25.0%", 1, true)); truthy(r18:find("12.5%", 1, true))
+    truthy(r16:find("█", 1, true) and r16:find("░", 1, true), "bar")
+    eq(row_text(ctx.gpu, 19), nil)
+end)
+
+test("page 1 colours follow the thresholds (>=60 green, >=50 yellow, else red)", function()
+    sdapi._reset_cache()
+    local restore = install_machines({
+        ["aaaa"] = fake_battery(LSC, { "Used Capacity: 80%" }), ["bbbb"] = fake_battery(LSC, { "Used Capacity: 55%" }),
+        ["cccc"] = fake_battery(LSC, { "Used Capacity: 20%" }),
+    })
+    local ctx = make_ctx()
+    sdlogic.render_page1()
+    restore()
+    local function fg(y) for i = #ctx.gpu.sets, 1, -1 do if ctx.gpu.sets[i].y == y then return ctx.gpu.sets[i].fg end end end
+    eq(fg(16), 0x00FF00); eq(fg(17), 0xFFEE00); eq(fg(18), 0xFF5555)
+    truthy(row_text(ctx.gpu, 16):find("?", 1, true), "percentage-only battery has unknown stored/total")
+end)
+
+test("page 1: no battery on the network -> clear message; unreadable one is shown in red", function()
+    sdapi._reset_cache()
+    local ctx = make_ctx()
+    listings = {}
+    sdlogic.render_page1()
+    truthy(row_text(ctx.gpu, 13):find("找不到電池", 1, true))
+    sdapi._reset_cache(); sdlogic.reset_draw_cache()
+    local restore = install_machines({ ["aaaa"] = fake_battery(LSC, nil, { sensor_error = true }) })
+    sdlogic.render_page1()
+    restore()
+    truthy(row_text(ctx.gpu, 16):find("讀取失敗", 1, true))
+    truthy(row_text(ctx.gpu, 13):find("無法讀取電量", 1, true))
+end)
+
+test("page 1: more batteries than rows -> last row says how many are hidden", function()
+    sdapi._reset_cache()
+    local machines = {}
+    for i = 1, 40 do machines[string.format("b%03d", i)] = fake_battery(LSC, { "Used Capacity: 70%" }) end
+    local restore = install_machines(machines)
+    local ctx = make_ctx()
+    sdlogic.render_page1()
+    restore()
+    truthy(row_text(ctx.gpu, 50):find("另有 6 顆未顯示", 1, true), row_text(ctx.gpu, 50))
+    for _, st in ipairs(ctx.gpu.sets) do truthy(st.y <= 50) end
+end)
+
+test("page 1: unchanged data is not redrawn; a changed battery redraws only its row", function()
+    sdapi._reset_cache()
+    local b1 = fake_battery(LSC, { "EU Stored: 1E9", "Total Capacity: 4E9" })
+    local b2 = fake_battery(LSC, { "EU Stored: 2E9", "Total Capacity: 4E9" })
+    local restore = install_machines({ ["aaaa"] = b1, ["bbbb"] = b2 })
+    local ctx = make_ctx()
+    sdlogic.render_page1()
+    local first = #ctx.gpu.sets
+    sdlogic.render_page1()
+    eq(#ctx.gpu.sets, first, "identical frame -> zero gpu.set calls")
+    b2.getSensorInformation = function() return { "EU Stored: 3E9", "Total Capacity: 4E9" } end
+    sdlogic.render_page1()
+    local changed = {}
+    for i = first + 1, #ctx.gpu.sets do changed[ctx.gpu.sets[i].y] = true end
+    truthy(changed[17] and changed[13], "row 17 (battery 2) and the summary changed")
+    truthy(not changed[16], "battery 1 row untouched")
+    sdlogic.reset_draw_cache()
+    local before = #ctx.gpu.sets
+    sdlogic.render_page1()
+    truthy(#ctx.gpu.sets > before, "reset_draw_cache forces a full redraw")
+    restore()
+end)
+
+-- ========== speed: caches and query modes ==========
+test("config cache: inside config_check_interval the file system is not touched at all", function()
+    cfg_items({ restock("Iron") })
+    Main.config_check_interval = 10
+    Main.now = 100
+    eq(#sdlogic.load_hybrid_config(), 1)
+    fs_calls.exists, fs_calls.lastModified = 0, 0
+    for _ = 1, 20 do Main.now = Main.now + 0.4; sdlogic.load_hybrid_config() end
+    eq(fs_calls.exists + fs_calls.lastModified, 0, "no fs calls inside the interval")
+    Main.now = 111
+    sdlogic.load_hybrid_config()
+    eq(fs_calls.lastModified, 1, "one cheap lastModified check after the interval")
+    cfg_items({ restock("Iron"), restock("Gold") })         -- edited by hand
+    Main.now = 125
+    eq(#sdlogic.load_hybrid_config(), 2, "edit picked up after the next check")
+end)
+
+test("config cache: validated items are reused while the file is unchanged", function()
+    cfg_items({ restock("Iron") })
+    Main.config_check_interval = 10
+    local a = sdlogic.load_hybrid_config()
+    local b = sdlogic.load_hybrid_config()
+    truthy(a == b, "same table instance: nothing rebuilt")
+end)
+
+test("config cache: scan_database makes new items visible immediately", function()
+    Main.config_check_interval = 3600
+    Main.db = db_with({ [1] = stack("a:x", 0, "Iron") })
+    cfg('{"items":[]}')
+    eq(#sdlogic.load_hybrid_config(), 0)
+    eq((sdlogic.scan_database()), 1)
+    eq(#sdlogic.load_hybrid_config(), 1, "no waiting for the check interval")
+end)
+
+test("query mode auto: few items -> one filtered call per label", function()
+    local list = {}
+    for i = 1, 3 do list[i] = restock("Item" .. i) end
+    cfg_items(list)
+    local ctx = make_ctx()
+    local calls = {}
+    ctx.ae.getItemsInNetwork = function(filter) calls[#calls + 1] = filter and filter.label or "ALL"; return {} end
+    render(ctx, 5000)
+    eq(#calls, 3); eq(calls[1], "Item1")
+    eq(ctx.perf.mode, "filter")
+end)
+
+test("query mode auto: many items -> ONE unfiltered call, counts summed per label", function()
+    local list = {}
+    for i = 1, 12 do list[i] = restock("Item" .. i, 1000, 10) end
+    cfg_items(list)
+    local ctx = make_ctx()
+    local calls = 0
+    ctx.ae.getItemsInNetwork = function(filter)
+        calls = calls + 1
+        eq(filter, nil, "unfiltered")
+        return { { label = "Item1", size = 5 }, { label = "Item1", size = 6, name = "other", damage = 4 }, { label = "Item2", size = 7 }, { label = "Unrelated", size = 99 } }
+    end
+    render(ctx, 5000)
+    eq(calls, 1); eq(ctx.perf.mode, "full")
+    truthy(row_text(ctx.gpu, 16):find("11", 1, true), "Item1 = 5 + 6")
+    truthy(row_text(ctx.gpu, 17):find("7", 1, true))
+    truthy(row_text(ctx.gpu, 18):find("0", 1, true), "labels not in the network count as 0")
+end)
+
+test("query mode can be forced; a failed full scan marks every item as failed (never 0)", function()
+    cfg_items({ restock("Iron"), restock("Gold") })
+    local ctx = make_ctx({ query_mode = "full" })
+    local calls = 0
+    ctx.ae.getItemsInNetwork = function() calls = calls + 1; error("down") end
+    local ordered = false
+    ctx.ae.getCraftables = function() ordered = true; return {} end
+    render(ctx, 5000)
+    eq(calls, 1); eq(ctx.perf.mode, "full"); eq(ordered, false)
+    truthy(row_text(ctx.gpu, 16):find("AE查詢失敗", 1, true) and row_text(ctx.gpu, 17):find("AE查詢失敗", 1, true))
+end)
+
+test("page 2 draw cache: an identical refresh sends nothing to the gpu", function()
+    cfg_items({ restock("Iron"), restock("Gold") })
+    local ctx = make_ctx()
+    ctx.ae.getItemsInNetwork = function() return { { label = "Iron", size = 500 }, { label = "Gold", size = 500 } } end
+    render(ctx, 5000)
+    local first = #ctx.gpu.sets
+    truthy(first > 0)
+    render(ctx, 5005)
+    local new_rows = {}
+    for i = first + 1, #ctx.gpu.sets do new_rows[#new_rows + 1] = ctx.gpu.sets[i].y end
+    for _, y in ipairs(new_rows) do eq(y, 10, "only the changing perf line may be redrawn (row " .. y .. ")") end
+end)
+
+test("page 2 draw cache: rows below a shorter list are blanked", function()
+    cfg_items({ restock("A"), restock("B"), restock("C"), restock("D") })
+    local ctx = make_ctx()
+    render(ctx, 5000)
+    truthy(row_text(ctx.gpu, 19):find("D", 1, true))
+    cfg_items({ restock("A"), restock("B") })
+    Main.config_check_interval = 0
+    render(ctx, 5005)
+    eq(row_text(ctx.gpu, 19):match("^%s*$") ~= nil, true, "row 19 blanked")
+    eq(row_text(ctx.gpu, 18):match("^%s*$") ~= nil, true, "row 18 blanked")
+    truthy(row_text(ctx.gpu, 17):find("B", 1, true))
+end)
+
+test("empty config message is fully replaced when items appear again", function()
+    cfg('{"items":[]}')
+    local ctx = make_ctx()
+    render(ctx, 5000)
+    truthy(row_text(ctx.gpu, 17):find("為空", 1, true))
+    cfg_items({ restock("Iron") })
+    render(ctx, 5005)
+    local r = row_text(ctx.gpu, 17)
+    truthy(not r:find("為空", 1, true))
+end)
+
+test("log file is only rewritten when its content changes", function()
+    cfg_items({ restock("Iron") })
+    local ctx = make_ctx()
+    ctx.ae.getItemsInNetwork = function() return { { label = "Iron", size = 500 } } end
+    render(ctx, 5000)
+    truthy(read(ctx.log_file_path):find("Iron=0=0=0", 1, true))
+    write(ctx.log_file_path, "SENTINEL")
+    render(ctx, 5005)
+    eq(read(ctx.log_file_path), "SENTINEL", "unchanged state -> no write")
+    ctx.ae.getItemsInNetwork = function() return { { label = "Iron", size = 1 } } end
+    ctx.last_order_time[key_of("Iron")] = 5005                  -- in cooldown -> different tag
+    render(ctx, 5010)
+    truthy(read(ctx.log_file_path):find("Iron=2", 1, true), "changed state -> rewritten")
+end)
+
+test("timing readout: perf table and the line on row 10", function()
+    cfg_items({ restock("Iron") })
+    local ctx = make_ctx()
+    local t = 0
+    ctx.get_now_time = function() t = t + 0.05; return t end
+    render(ctx, 0)
+    truthy(ctx.perf.total > 0 and ctx.perf.n == 1)
+    local row = row_text(ctx.gpu, 10)
+    truthy(row:find("刷新耗時", 1, true) and row:find("設定", 1, true) and row:find("AE2", 1, true) and row:find("filter", 1, true), row)
+end)
+
 -- ========== touch_menu: module wiring ==========
 local function load_real_menu(with_database)
     package.loaded.touch_menu = nil
@@ -839,7 +1108,7 @@ end
 test("touch_menu loads without a database component and binds screen before drawing", function()
     local ok, menu, gpu, order, cleanup = load_real_menu(false)
     truthy(ok, "require failed: " .. tostring(menu))
-    menu.config_file_path = TMP_DIR .. "/menu_cfg.json"; menu.realtime_path = TMP_DIR .. "/menu_time.txt"
+    menu.config_file_path = TMP_DIR .. "/menu_cfg.json"
     eq(menu.start(), true)
     eq(order[1], "bind", "bind must precede any drawing")
     truthy(listeners.modem_message, "query listener not registered")
@@ -857,8 +1126,35 @@ test("touch_menu loads without a database component and binds screen before draw
     menu.handle_touch(85, 4)
     eq(menu.list_page, 1, "pager must be inactive on the clock page / reset on switch")
     eq(menu.query_port, 102); eq(menu.items_per_page, 35); truthy(menu.get_now_time)
+    eq(menu.realtime_path, nil, "clock settings are gone")
     menu.stop()
     eq(listeners.modem_message, nil, "listener must be removed on stop")
+    cleanup()
+end)
+
+test("touch_menu: first page is the battery view, and switching to it rescans the batteries", function()
+    sdapi._reset_cache()
+    local ok, menu, gpu, order, cleanup = load_real_menu(false)
+    truthy(ok, "require failed: " .. tostring(menu))
+    local bat = fake_battery(LSC, { "EU Stored: 2E9", "Total Capacity: 4E9" })
+    local restore_machines = install_machines({ ["a875-bat"] = bat })
+    listings["6429-gpu"] = "gpu"; listings["a875-scr"] = "screen"
+    local proxy_with_machines = component.proxy
+    component.proxy = function(addr) if addr == "6429-gpu" then return gpu end return proxy_with_machines(addr) end
+    menu.config_file_path = TMP_DIR .. "/menu_cfg4.json"
+    menu.start()
+    local text = {}
+    for _, st in ipairs(gpu.sets) do text[#text + 1] = st.s end
+    local all = table.concat(text, "\n")
+    truthy(all:find("電池電量", 1, true), "tab label")
+    truthy(all:find("共 1 顆電池", 1, true) and all:find("50.0%", 1, true), "battery rendered on start")
+    truthy(not all:find("REALWORLD", 1, true))
+    local scans = bat.calls.getName
+    menu.handle_touch(40, 4)             -- AE2 page
+    menu.handle_touch(10, 4)             -- back to batteries
+    truthy(bat.calls.getName > scans, "page switch forces a rescan")
+    menu.stop()
+    restore_machines()
     cleanup()
 end)
 
@@ -867,7 +1163,7 @@ test("touch_menu: start() scans the database; the scan button adds items found l
     truthy(ok, "require failed: " .. tostring(menu))
     local path = TMP_DIR .. "/menu_cfg2.json"
     os.remove(path); os.remove(path .. ".bak")
-    menu.config_file_path = path; menu.realtime_path = TMP_DIR .. "/menu_time.txt"
+    menu.config_file_path = path
     -- start(): init scan registers the 2 items already in the database
     eq(menu.start(), true)
     local items = sdlogic.load_hybrid_config()
@@ -899,7 +1195,7 @@ test("touch_menu: scan failure is shown, not thrown", function()
     truthy(ok)
     local path = TMP_DIR .. "/menu_cfg3.json"
     write(path, "{ broken")
-    menu.config_file_path = path; menu.realtime_path = TMP_DIR .. "/menu_time.txt"
+    menu.config_file_path = path
     menu.start()
     truthy(menu.scan_message and menu.scan_message.color == 0xFF5555, "error colour")
     menu.handle_touch(40, 4); menu.handle_touch(120, 4)

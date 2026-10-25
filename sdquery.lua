@@ -1,6 +1,7 @@
 -- 檔案路徑：sdquery.lua
 -- 讓其他電腦(經由 server.lua 中繼或直接)查詢 AE2 物品數量。
--- 只能查「已登錄在 ae_config.json 裡」的物品 (物品要先放進 database 並掃描新增)，以 label 查詢。
+-- 只能查「已登錄在 ae_config.json 裡」的物品 (物品要先放進 database 並掃描新增)。
+-- 查詢只接受 label (AE2 端也只用 label 搜尋，name/damage 不參與查詢)。
 --
 -- OpenComputers 一則網路訊息最多 8 個參數，所以內容一律包成「一個 JSON 字串」。
 --
@@ -11,7 +12,7 @@
 --   有填 via 時，回覆會透過該電腦的 FORWARD_CMD (Port 100) 轉發，否則直接回覆到 reply_to。
 --
 -- 回覆 (每個物品一則 + 一則結束訊息)：
---   "AE_QUERY_REPLY", '{"id":"r1","key":"Iron","ok":true,"count":123,"name":"minecraft:iron_ingot","damage":0}'
+--   "AE_QUERY_REPLY", '{"id":"r1","key":"Iron","ok":true,"count":123}'
 --   "AE_QUERY_REPLY", '{"id":"r1","key":"Gold","ok":false,"error":"..."}'
 --   "AE_QUERY_DONE",  '{"id":"r1","n":2}'
 local component = require("component")
@@ -62,10 +63,10 @@ function sdquery.process(modem, request)
                     local count, err = sdlogic.count_item(item, m.ae)
                     if count then
                         reply(modem, via, reply_to, reply_port, "AE_QUERY_REPLY",
-                            { id = id, key = key, ok = true, count = count, name = item.name, damage = item.damage })
+                            { id = id, key = key, ok = true, count = count })
                     else
                         reply(modem, via, reply_to, reply_port, "AE_QUERY_REPLY",
-                            { id = id, key = key, ok = false, error = err, name = item.name, damage = item.damage })
+                            { id = id, key = key, ok = false, error = err })
                     end
                 end
             end

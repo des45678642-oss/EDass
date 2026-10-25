@@ -1,111 +1,133 @@
 -- 檔案路徑：sdapi.lua
--- 時間相關函式。參數(檔案路徑…)直接讀取主程式 touch_menu，不再用傳遞的方式。
--- 設定檔載入 load_hybrid_config 已移到 sdlogic.lua。
-local io = require("io")
-local computer = require("computer")
-local internet = require("internet")
+-- 電池相關的硬體 API：找出網路上所有 GT 蘭波頓超級電容(multimachine.supercapacitor)並讀取電量。
+-- 參數(電池名稱、重新掃描間隔…)直接讀取主程式 touch_menu，不用傳遞。
+local component = require("component")
 
 local api = {}
 
 -- 延遲載入主程式，避免與 touch_menu 載入時互相 require 造成循環
 local function main() return require("touch_menu") end
 
-function api.update_time()
-    local MY_SERVER_URL = "http://192.168.212.103:8080"
-    local path = main().realtime_path
-    local result, response = pcall(internet.request, MY_SERVER_URL)
-    if result and response then
-        local html_content = ""
-        -- 讀取設有 5 秒上限，避免伺服器無回應時卡死計時器回呼
-        local deadline = computer.uptime() + 5
-        local read = (type(response) == "table" and type(response.read) == "function") and response.read or response
-        repeat
-            local ok, chunk = pcall(read)
-            if not ok then chunk = nil end
-            if chunk then html_content = html_content .. chunk end
-        until not chunk or computer.uptime() > deadline
-        local raw_time = string.match(html_content, 'id="time">([^<]+)</span>')
-        local raw_date = string.match(html_content, 'id="date">([^<]+)</span>')
-        if raw_time and raw_date then
-            local file = io.open(path, "w")
-            if file then
-                file:write("date=" .. raw_date .. "\n")
-                file:write("time=" .. raw_time .. "\n")
-                file:write("type=net\n")
-                file:flush()
-                file:close()
+-- ========================================================
+-- 【數字解析】getSensorInformation 的數字可能有千分位逗號、顏色碼，也可能是科學記號 (1.5E10)
+-- ========================================================
+local function strip_codes(s)
+    s = tostring(s)
+    s = s:gsub("\194\167%w", "")          -- Minecraft 顏色碼 §a
+    s = s:gsub("\27%[[%d;]*m", "")        -- ANSI 顏色碼
+    return s
+end
+
+local function strip_commas(s)
+    local prev
+    repeat prev = s; s = s:gsub("(%d),(%d)", "%1%2") until s == prev
+    return s
+end
+
+-- 回傳字串中依序出現的數字 (支援 1234 / 12.5 / 1.5E10 / 1.5e+10)
+function api.numbers_in(s)
+    s = strip_commas(strip_codes(s))
+    local out, pos = {}, 1
+    while true do
+        local start = s:find("%d", pos)
+        if not start then break end
+        local tok = s:match("^%d+%.?%d*[eE][+-]?%d+", start) or s:match("^%d+%.?%d*", start)
+        local n = tonumber(tok)
+        if n then out[#out + 1] = n + 0.0 end
+        pos = start + #tok
+    end
+    return out
+end
+
+-- 從 getSensorInformation() 的行列解析電量。成功回傳 { stored=, total=, pct= }，
+-- 只有百分比時 stored/total 為 nil；解析不到回傳 nil, 原因
+function api.parse_sensor(lines)
+    if type(lines) ~= "table" then return nil, "沒有感測資料" end
+    local stored, total, pct
+    for _, raw in ipairs(lines) do
+        local line = strip_codes(raw)
+        local low = line:lower()
+        local after = line:match("^[^:]*:(.*)$") or line     -- 冒號後面才是數值
+        if low:find("used%s+capacity") then
+            local p = strip_commas(after):match("([%d%.]+)%s*%%")
+            if p and not pct then pct = tonumber(p) end
+        elseif low:find("stored") and low:find("/", 1, true) then
+            local nums = api.numbers_in(after)
+            if #nums >= 2 and not (stored and total) then stored, total = nums[1], nums[2] end
+        elseif low:find("stored") then
+            local nums = api.numbers_in(after)
+            if nums[1] and not stored then stored = nums[1] end
+        elseif low:find("total") and (low:find("capacity") or low:find("eu")) then
+            local nums = api.numbers_in(after)
+            if nums[1] and not total then total = nums[1] end
+        end
+    end
+    if stored and total and total > 0 then
+        return { stored = stored, total = total, pct = math.min(100, stored / total * 100) }
+    end
+    if pct then return { pct = pct } end
+    return nil, "無法解析電量資訊"
+end
+
+-- ========================================================
+-- 【電池搜尋】掃描所有 gt_machine，getName() 含 multimachine.supercapacitor 的就是電池
+-- 掃描要對每個元件呼叫 getName，比較慢，所以結果快取，間隔 battery_rescan_interval 秒才重掃
+-- ========================================================
+local cache = { list = nil, scanned_at = nil }
+
+function api.find_batteries(force)
+    local m = main()
+    local now = m.get_now_time and m.get_now_time() or 0
+    local interval = m.battery_rescan_interval or 60
+    if not force and cache.list and cache.scanned_at and now >= cache.scanned_at and now - cache.scanned_at < interval then
+        return cache.list
+    end
+    local list = {}
+    local ok_list = pcall(function()
+        for addr in component.list("gt_machine") do
+            local ok, proxy = pcall(component.proxy, addr)
+            if ok and proxy then
+                local ok_name, name = pcall(proxy.getName)
+                if ok_name and type(name) == "string" and name:find(m.battery_name or "multimachine.supercapacitor", 1, true) then
+                    list[#list + 1] = { address = addr, proxy = proxy }
+                end
             end
         end
-    end
+    end)
+    if not ok_list then list = {} end
+    table.sort(list, function(a, b) return a.address < b.address end)
+    cache.list, cache.scanned_at = list, now
+    return list
 end
 
-function api.get_days_in_month(month, year)
-    local days = {31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31}
-    if month == 2 and ((year % 4 == 0 and year % 100 ~= 0) or (year % 400 == 0)) then return 29 end
-    return days[month]
+-- 讀取單顆電池。回傳 { address=, stored=, total=, pct= } 或 { address=, err= }
+function api.read_battery(b)
+    local ok, lines = pcall(b.proxy.getSensorInformation)
+    if not ok then return { address = b.address, err = "讀取失敗" } end
+    local info, err = api.parse_sensor(lines)
+    if not info then return { address = b.address, err = err } end
+    info.address = b.address
+    return info
 end
 
-function api.local_tick_time(seconds_to_add)
-    local path = main().realtime_path
-    local file = io.open(path, "r")
-    local cur_date, cur_time = nil, nil
-    if file then
-        for line in file:lines() do
-            local d = string.match(line, "^date=(.-)$")
-            local t = string.match(line, "^time=(.-)$")
-            if d then cur_date = d end
-            if t then cur_time = t end
-        end
-        file:close()
-    end
-    if cur_date and cur_time then
-        local y, mo, d = string.match(cur_date, "(%d%d%d%d)%-(%d%d)%-(%d%d)")
-        local h, m, s = string.match(cur_time, "(%d%d):(%d%d):(%d%d)")
-        local year, month, day = tonumber(y), tonumber(mo), tonumber(d)
-        local hour, min, sec = tonumber(h), tonumber(m), tonumber(s)
-        sec = sec + seconds_to_add
-        if sec >= 60 then min = min + math.floor(sec / 60); sec = sec % 60 end
-        if min >= 60 then hour = hour + math.floor(min / 60); min = min % 60 end
-        if hour >= 24 then
-            local days_to_add = math.floor(hour / 24)
-            hour = hour % 24
-            day = day + days_to_add
-            while true do
-                local max_days = api.get_days_in_month(month, year)
-                if day > max_days then
-                    day = day - max_days
-                    month = month + 1
-                    if month > 12 then month = 1; year = year + 1 end
-                else break end
-            end
-        end
-        local date_part = string.format("%04d-%02d-%02d", year, month, day)
-        local time_part = string.format("%02d:%02d:%02d", hour, min, sec)
-        local w_file = io.open(path, "w")
-        if w_file then
-            w_file:write("date=" .. date_part .. "\n")
-            w_file:write("time=" .. time_part .. "\n")
-            w_file:write("type=calc\n")
-            w_file:flush()
-            w_file:close()
+-- 讀取網路上所有電池。回傳 陣列，另外回傳合計 { stored, total, pct, count }
+function api.read_all_batteries(force_rescan)
+    local result, sum_stored, sum_total, counted = {}, 0.0, 0.0, 0
+    for _, b in ipairs(api.find_batteries(force_rescan)) do
+        local info = api.read_battery(b)
+        result[#result + 1] = info
+        if info.stored and info.total then
+            sum_stored = sum_stored + info.stored
+            sum_total = sum_total + info.total
+            counted = counted + 1
         end
     end
+    local summary = { count = #result, counted = counted, stored = sum_stored, total = sum_total,
+                      pct = sum_total > 0 and (sum_stored / sum_total * 100) or nil }
+    return result, summary
 end
 
-function api.read_saved_time()
-    local realtime_path = main().realtime_path
-    local file = io.open(realtime_path, "r")
-    local file_date, file_time = "----- --:--", "--:--:--"
-    if file then
-        for line in file:lines() do
-            local d = string.match(line, "^date=(.-)$")
-            local t = string.match(line, "^time=(.-)$")
-            if d then file_date = d end
-            if t then file_time = t end
-        end
-        file:close()
-    end
-    return file_time, file_date
-end
+-- 測試用：清掉快取
+function api._reset_cache() cache.list, cache.scanned_at = nil, nil end
 
 return api

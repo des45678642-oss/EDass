@@ -5,7 +5,6 @@ local event = require("event")
 local term = require("term")
 
 -- 🌟 載入外包的獨立模組（它們直接讀取本檔案 M 內的參數，不再由這裡傳遞）
-local sdapi = require("sdapi")
 local sdlogic = require("sdlogic")
 local sdquery = require("sdquery")
 
@@ -21,17 +20,24 @@ local target_gpu_address      = "6429"
 local target_screen_address   = "a875"   
 local refresh_delay           = 5        -- 畫面與動態補貨檢查間隔 (5 秒)
 local default_cooldown        = 600      -- 全域預設冷卻時間（秒）
-local time_delay              = 300
-local time_counter = time_delay 
 
 -- 檔案路徑配置
 local config_file_path        = "/mnt/4c8/ae_config.json"
 local log_file_path           = "/mnt/4c8/ae_log.txt"
-local realtime_path           = "/mnt/4c8/realtime.txt"
 
 -- 🌟 【AE2 遠端查詢：與 server.lua 中繼電腦配合】
 local query_port              = 102      -- 本機監聽的查詢埠
 local relay_port              = 100      -- server.lua 的 SERVER_PORT (回覆經中繼時使用)
+
+-- 🌟 【第一頁：電池電量顯示】網路上所有 getName() 含此字串的 gt_machine 都會列出
+-- (唱片機追蹤的電池仍然固定用下面的 battery_address)
+local battery_name            = "multimachine.supercapacitor"
+local battery_rescan_interval = 60       -- 重新搜尋電池的間隔(秒)；搜尋要對每台機器呼叫 getName，比較慢
+
+-- 🌟 【速度相關】
+local config_check_interval   = 10       -- 幾秒內不重新檢查 ae_config.json 是否被修改(掃描/轉換後會立刻重讀)
+local query_mode              = "auto"   -- AE2 庫存查詢："filter" 每個 label 查一次 / "full" 一次查全部 / "auto" 物品多就用 full
+local query_full_threshold    = 8        -- auto 模式下，物品超過幾個就改用 full
 
 -- 🌟 【新功能：低電量自動唱片機配置】
 local battery_address         = "20b2"   -- 電池地址
@@ -77,7 +83,7 @@ if component.isAvailable("jukebox") then
     jukebox_comp = component.jukebox
 end
 
-local btn1 = { x = 5,  y = 3, w = 25, h = 4, label = "   系統時間大螢幕   " }
+local btn1 = { x = 5,  y = 3, w = 25, h = 4, label = "     電池電量     " }
 local btn2 = { x = 35, y = 3, w = 25, h = 4, label = "   AE2 核心物資倉   " }
 -- 第二頁專用：物品清單換頁鍵
 local btn_prev = { x = 65, y = 3, w = 14, h = 4, label = "◀ 上一頁" }
@@ -106,13 +112,18 @@ end
 -- ========================================================
 M.gpu, M.ae, M.db = gpu, ae, db
 M.SCR_W, M.SCR_H = SCR_W, SCR_H
-M.config_file_path, M.log_file_path, M.realtime_path = config_file_path, log_file_path, realtime_path
+M.config_file_path, M.log_file_path = config_file_path, log_file_path
 M.default_cooldown = default_cooldown
 M.active_ae_requests, M.last_order_time = active_ae_requests, last_order_time
 M.battery, M.jukebox = battery_comp, jukebox_comp
 M.energy_threshold, M.high_threshold = low_energy_threshold, high_energy_threshold
 M.query_port, M.relay_port = query_port, relay_port
 M.items_per_page = items_per_page
+M.battery_name, M.battery_rescan_interval = battery_name, battery_rescan_interval
+M.config_check_interval = config_check_interval
+M.query_mode, M.query_full_threshold = query_mode, query_full_threshold
+M.perf = nil             -- 第二頁每次刷新後由 sdlogic 填入耗時
+M.battery_rescan_requested = true   -- 換到第一頁時強制重新搜尋電池
 M.database_slots = database_slots
 M.scan_message = nil     -- { text = "...", color = 0x... }，顯示在第二頁第 13 列
 M.list_page, M.list_pages = list_page, list_pages
@@ -145,7 +156,10 @@ function M.draw_scan_message()
     if current_page ~= 2 then return end
     gpu.setBackground(0x000000)
     gpu.set(6, 13, string.rep(" ", 150))
-    if M.scan_message then
+    if not M.scan_message and not db then
+        gpu.setForeground(0xFFAA00)
+        gpu.set(6, 13, "[⚠️ 找不到 database 組件：無法掃描新增物品，其餘功能不受影響]")
+    elseif M.scan_message then
         gpu.setForeground(M.scan_message.color or 0xFFFFFF)
         gpu.set(6, 13, M.scan_message.text)
     end
@@ -180,17 +194,9 @@ local function init_page_background()
     gpu.setBackground(0x000000)
     gpu.fill(1, 9, SCR_W, SCR_H - 8, " ")
     
+    sdlogic.reset_draw_cache()          -- 上面剛把整區清掉，快取必須一起作廢
     if current_page == 1 then
-        gpu.setForeground(0xFFFF00)
-        gpu.set(15, 15, "╔═════════════════════════════════════════════════════════════════════════════════════════╗")
-        gpu.set(15, 16, "║                                                                                         ║")
-        gpu.set(15, 17, "║   [ REALWORLD TIME SYSTEM ]                                                             ║")
-        gpu.set(15, 18, "║                                                                                         ║")
-        gpu.set(15, 19, "║   ► 目前真實時間 (TIME) :                                                               ║")
-        gpu.set(15, 20, "║                                                                                         ║")
-        gpu.set(15, 21, "║   ► 目前真實日期 (DATE) :                                                               ║")
-        gpu.set(15, 22, "║                                                                                         ║")
-        gpu.set(15, 23, "╚═════════════════════════════════════════════════════════════════════════════════════════╝")
+        -- 第一頁(電池)的內容全部由 sdlogic.render_page1 繪製
     elseif current_page == 2 then
         M.draw_scan_message()
         gpu.setForeground(0x00FFFF)
@@ -198,12 +204,9 @@ local function init_page_background()
         if not ae then
             gpu.setForeground(0xFF0000)
             gpu.set(6, 14, " [❌ 系統異常] 找不到物理 ME 控制器或介面元件！請檢查自動補貨線纜。")
-        elseif not db then
-            gpu.setForeground(0xFF5555)
-            gpu.set(6, 14, " [⚠️ 設備缺漏] 找不到資料庫晶片 (Database Upgrade)！無法動態解析組態。")
         else
             gpu.setForeground(0xBBBBBB)
-            gpu.set(6, 14, "  物 資 名 稱 ( ITEM LABEL BY DB )        |  目前庫存  | 自動補貨狀態 ( STATUS )")
+            gpu.set(6, 14, "  物 資 名 稱 ( ITEM LABEL )               |  目前庫存  | 自動補貨狀態 ( STATUS )")
             gpu.set(6, 15, "  ────────────────────────────────────────+────────────+───────────────────────────────────────────────")
         end
     end
@@ -216,16 +219,7 @@ end
 local function update_dynamic_data(force_refresh)
     gpu.setBackground(0x000000)
     
-    -- 1. 時間核心計時器邏輯（保留）
-	if time_counter >= time_delay then
-        pcall(sdapi.update_time) 
-        time_counter = 0
-    else
-        -- 不分頁面都推進時鐘，切回第一頁時才不會顯示過期時間
-        pcall(sdapi.local_tick_time, 1)
-        time_counter = time_counter + 1
-    end
-	
+
 	internal_counter = internal_counter + 1
 	
     -- 3. 根據頁面進行判斷與外包呼叫（保留判斷，內容清空由新檔案處理）
@@ -236,11 +230,10 @@ local function update_dynamic_data(force_refresh)
         pcall(sdlogic.check_battery_and_play)
     end
 	
-    if current_page == 1 then
-        pcall(sdlogic.render_page1)
-
-    elseif current_page == 2 and ae and db then
-        if is_5s_elapsed or force_refresh then
+    if is_5s_elapsed or force_refresh then
+        if current_page == 1 then
+            pcall(sdlogic.render_page1)
+        elseif current_page == 2 and ae then
             pcall(sdlogic.render_page2)
         end
     end
@@ -255,6 +248,7 @@ end
 
 local function switch_page(page_num)
     current_page = page_num
+    M.battery_rescan_requested = true
     M.list_page = 1
     draw_navigation()
     init_page_background()
@@ -263,19 +257,21 @@ end
 
 -- 即時掃描 database，把還沒登錄的物品新增到 JSON，並更新畫面
 function M.scan_now()
-    local ok, n, added = pcall(sdlogic.scan_database)
+    local ok, n, added, skipped = pcall(sdlogic.scan_database)
     if not ok then
         M.scan_message = { text = "掃描失敗: " .. tostring(n), color = 0xFF5555 }
     elseif not n then
         M.scan_message = { text = "掃描失敗: " .. tostring(added), color = 0xFF5555 }
     elseif n == 0 then
-        M.scan_message = { text = "掃描完成：沒有新增物品", color = 0xBBBBBB }
+        local extra = (skipped and #skipped > 0) and string.format("（%d 個 label 重複、name/damage 不同的物品已略過）", #skipped) or ""
+        M.scan_message = { text = "掃描完成：沒有新增物品" .. extra, color = 0xBBBBBB }
     else
         local shown = {}
         for i = 1, math.min(#added, 5) do shown[#shown + 1] = added[i] end
         local more = #added > 5 and string.format(" ...等 %d 個", #added) or ""
-        M.scan_message = { text = string.format("掃描完成：新增 %d 個物品 (%s%s)，預設為 monitor，請到設定檔設定補貨",
-            n, table.concat(shown, ", "), more), color = 0x00FF00 }
+        M.scan_message = { text = string.format("掃描完成：新增 %d 個物品 (%s%s)，預設為 monitor，請到設定檔設定補貨%s",
+            n, table.concat(shown, ", "), more,
+            (skipped and #skipped > 0) and string.format("；另有 %d 個 label 重複的已略過", #skipped) or ""), color = 0x00FF00 }
     end
     M.draw_scan_message()
     update_dynamic_data(true)
