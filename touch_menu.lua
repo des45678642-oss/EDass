@@ -7,6 +7,7 @@ local term = require("term")
 -- 🌟 載入外包的獨立模組（它們直接讀取本檔案 M 內的參數，不再由這裡傳遞）
 local sdlogic = require("sdlogic")
 local sdquery = require("sdquery")
+local sdminer = require("sdminer")
 
 local M = {} 
 local timer_id, main_thread
@@ -38,6 +39,17 @@ local battery_rescan_interval = 60       -- 重新搜尋電池的間隔(秒)；�
 local config_check_interval   = 10       -- 幾秒內不重新檢查 ae_config.json 是否被修改(掃描/轉換後會立刻重讀)
 local query_mode              = "auto"   -- AE2 庫存查詢："filter" 每個 label 查一次 / "full" 一次查全部 / "auto" 物品多就用 full
 local query_full_threshold    = 8        -- auto 模式下，物品超過幾個就改用 full
+
+-- 🌟 【礦機調度 (mode_tag = "miner")】對應原本的 space_main.lua，需要本機有 modem 和轉運器
+local miner_port              = 300      -- 與 space_miner.lua 約定的通訊埠
+local miner_strength          = 16       -- 對礦機發信的強度 (送完會還原成原本的強度)
+local miner_transposer_address = nil     -- 轉運器位址前綴；nil = 用預設那台
+local miner_chest_side        = 2        -- 轉運器貼著共享終界箱的方向
+local drone_item_name         = "gtnhintergalactic:item.MiningDrone"
+local miner_cooldown          = 300      -- 飽和後的冷卻(秒)，到期全廠回收重新分配；一輪最長也是這個時間
+local miner_dispatch_interval = 5        -- 每隔幾秒做一輪分配
+local miner_msgs_per_tick     = 4        -- 每秒最多送幾則指令 (原本靠 os.sleep(0.1) 間隔)
+local miner_settle            = 2        -- 指令送完後等幾秒再掃描終界箱 (讓礦機搬完物品)
 
 -- 🌟 【新功能：低電量自動唱片機配置】
 local battery_address         = "20b2"   -- 電池地址
@@ -83,6 +95,14 @@ if component.isAvailable("jukebox") then
     jukebox_comp = component.jukebox
 end
 
+local transposer_comp = nil
+for addr in component.list("transposer") do
+    if not miner_transposer_address or string.sub(addr, 1, #miner_transposer_address) == miner_transposer_address then
+        transposer_comp = component.proxy(addr)
+        break
+    end
+end
+
 local btn1 = { x = 5,  y = 3, w = 25, h = 4, label = "     電池電量     " }
 local btn2 = { x = 35, y = 3, w = 25, h = 4, label = "   AE2 核心物資倉   " }
 -- 第二頁專用：物品清單換頁鍵
@@ -90,6 +110,8 @@ local btn_prev = { x = 65, y = 3, w = 14, h = 4, label = "◀ 上一頁" }
 local btn_next = { x = 81, y = 3, w = 14, h = 4, label = "下一頁 ▶" }
 -- 第二頁專用：即時掃描 database 並新增尚未登錄的物品
 local btn_scan = { x = 115, y = 3, w = 22, h = 4, label = "🔍 掃描新增物品" }
+-- 第二頁專用：立刻回收全部礦機並重新分配 (原本 space_main 的「按 Enter 手動刷新」)
+local btn_miner = { x = 139, y = 3, w = 20, h = 4, label = "⛏ 重新分配礦機" }
 local database_slots = 81            -- database 升級最大格數 (Tier 3)
 local items_per_page = 35               -- 第 16 列起到螢幕底部
 local list_page, list_pages = 1, 1
@@ -119,6 +141,10 @@ M.battery, M.jukebox = battery_comp, jukebox_comp
 M.energy_threshold, M.high_threshold = low_energy_threshold, high_energy_threshold
 M.query_port, M.relay_port = query_port, relay_port
 M.items_per_page = items_per_page
+M.miner_port, M.miner_strength, M.miner_transposer = miner_port, miner_strength, transposer_comp
+M.miner_chest_side, M.drone_item_name = miner_chest_side, drone_item_name
+M.miner_cooldown, M.miner_dispatch_interval = miner_cooldown, miner_dispatch_interval
+M.miner_msgs_per_tick, M.miner_settle = miner_msgs_per_tick, miner_settle
 M.battery_name, M.battery_rescan_interval = battery_name, battery_rescan_interval
 M.config_check_interval = config_check_interval
 M.query_mode, M.query_full_threshold = query_mode, query_full_threshold
@@ -145,6 +171,7 @@ function M.draw_pager()
     draw_btn(btn_prev, M.list_page > 1)
     draw_btn(btn_next, M.list_page < M.list_pages)
     draw_btn(btn_scan, true)
+    draw_btn(btn_miner, sdminer.is_active())
     gpu.setBackground(0x000000)
     gpu.setForeground(0xFFFF00)
     gpu.set(btn_next.x + btn_next.w + 2, btn_prev.y + 1, string.format("第 %d / %d 頁      ", M.list_page, M.list_pages))
@@ -221,6 +248,9 @@ local function update_dynamic_data(force_refresh)
     
 
 	internal_counter = internal_counter + 1
+
+    -- 礦機調度：每秒推進一次，不論目前在哪一頁
+    pcall(sdminer.tick)
 	
     -- 3. 根據頁面進行判斷與外包呼叫（保留判斷，內容清空由新檔案處理）
 	
@@ -291,6 +321,13 @@ function M.handle_touch(cx, cy)
         update_dynamic_data(true)
     elseif current_page == 2 and is_clicked(cx, cy, btn_scan) then
         M.scan_now()
+    elseif current_page == 2 and is_clicked(cx, cy, btn_miner) then
+        if sdminer.refresh_now() then
+            M.scan_message = { text = "已要求礦機重新分配：先回收全部無人機，再依庫存重新派工", color = 0x55AFFF }
+        else
+            M.scan_message = { text = "礦機模組未啟用 (需要本機有 transposer 和 modem)", color = 0xFF5555 }
+        end
+        M.draw_scan_message()
     end
 end
 
@@ -306,6 +343,7 @@ function M.start()
     end
     switch_page(1)
     sdquery.start()
+    pcall(sdminer.start)
 
     timer_id = event.timer(1.0, function() update_dynamic_data(false) end, math.huge)
 
@@ -323,6 +361,7 @@ end
 
 function M.stop()
     sdquery.stop()
+    sdminer.stop()
     if timer_id then event.cancel(timer_id) timer_id = nil end
     if main_thread then main_thread:kill() main_thread = nil end
     term.clear()

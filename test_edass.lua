@@ -26,6 +26,8 @@ local function test(name, fn)
     package.loaded.touch_menu = Main
     os.remove(Main.config_file_path); os.remove(Main.config_file_path .. ".bak")
     if package.loaded.sdlogic and package.loaded.sdlogic._reset_config_cache then package.loaded.sdlogic._reset_config_cache() end
+    if package.loaded.sdminer and package.loaded.sdminer._reset then package.loaded.sdminer._reset() end
+    OPENED = {}
     local ok, err = pcall(fn)
     if ok then passed = passed + 1; print("PASS  " .. name)
     else failed = failed + 1; print("FAIL  " .. name .. "\n      " .. tostring(err)) end
@@ -57,7 +59,8 @@ function component.list(filter)
     return function() i = i + 1; if addrs[i] then return addrs[i][1], addrs[i][2] end end
 end
 component.proxy = function(addr) return { address = addr } end
-component.invoke = function() end
+OPENED = {}
+component.invoke = function(addr, method, ...) if method == "open" then OPENED[#OPENED + 1] = { addr = addr, port = ... } end end
 
 package.loaded.component = component
 package.loaded.computer = { uptime = function() return uptime end }
@@ -81,6 +84,7 @@ local sdapi = require("sdapi")
 local sdlogic = require("sdlogic")
 local sdjson = require("sdjson")
 local sdquery = require("sdquery")
+local sdminer = require("sdminer")
 
 local function write(path, text)
     local f = assert(io.open(path, "w")); f:write(text); f:close()
@@ -1077,11 +1081,413 @@ test("timing readout: perf table and the line on row 10", function()
     truthy(row:find("刷新耗時", 1, true) and row:find("設定", 1, true) and row:find("AE2", 1, true) and row:find("filter", 1, true), row)
 end)
 
+
+-- ========== miner mode (port of space_main) ==========
+local DRONE = "gtnhintergalactic:item.MiningDrone"
+local function drone(level, n) return { name = DRONE, damage = level - 1, size = n or 1 } end
+
+local function make_chest(stacks, size)
+    local tp = { size = size or 27, stacks = stacks, calls = { getAllStacks = 0 } }
+    tp.getInventorySize = function() return tp.size end
+    tp.getAllStacks = function() tp.calls.getAllStacks = tp.calls.getAllStacks + 1; return { getAll = function() return tp.stacks end } end
+    return tp
+end
+
+local function miner_item(label, target, extra)
+    local t = { name = "mod:" .. label, damage = 0, label = label, mode_tag = "miner", target_quantity = target,
+                distance = 91, weight = 1, limit = 0, min_miner_tier = 1, min_drone_tier = 3, max_drone_tier = 5 }
+    for k, v in pairs(extra or {}) do t[k] = v end
+    return t
+end
+
+local function make_miner_modem()
+    local mm = { sent = {}, strength = 400, order = {} }
+    function mm.send(to, port, ...)
+        mm.sent[#mm.sent + 1] = { to = to, port = port, args = { ... }, strength = mm.strength }
+    end
+    function mm.broadcast(port, ...)
+        mm.sent[#mm.sent + 1] = { broadcast = true, port = port, args = { ... }, strength = mm.strength }
+    end
+    function mm.getStrength() return mm.strength end
+    function mm.setStrength(v) mm.strength = v end
+    return mm
+end
+
+-- builds a complete miner environment; returns helpers
+local function miner_env(opts)
+    opts = opts or {}
+    local ctx = make_ctx()
+    local mm = make_miner_modem()
+    rawset(component, "modem", mm)
+    avail.modem = true
+    listings = { ["modem-a"] = "modem" }
+    local tp
+    if not opts.no_transposer then tp = make_chest(opts.chest or {}) end
+    for k, v in pairs({ miner_port = 300, miner_strength = 16, miner_chest_side = 2, drone_item_name = DRONE,
+        miner_cooldown = 300, miner_dispatch_interval = 5, miner_msgs_per_tick = 4, miner_settle = 2 }) do ctx[k] = v end
+    ctx.miner_transposer = tp
+    ctx.now = 1000
+    cfg_items(opts.items or {})
+    local stock = opts.stock or {}
+    ctx.ae.getItemsInNetwork = function(filter)
+        if opts.ae_down then error("ae down") end
+        local out = {}
+        for label, n in pairs(stock) do if not filter or filter.label == label then out[#out + 1] = { label = label, size = n } end end
+        return out
+    end
+    local env = { ctx = ctx, mm = mm, tp = tp, stock = stock }
+    function env.register(uuid, name) sdminer._on_modem_message("modem_message", "L", uuid, 300, 0, "MINER_REGISTER", name) end
+    function env.tick(n) for _ = 1, n or 1 do ctx.now = ctx.now + 1; sdminer.tick() end end
+    function env.sent_to(uuid)
+        local out = {}
+        for _, m in ipairs(mm.sent) do if m.to == uuid then out[#out + 1] = m end end
+        return out
+    end
+    function env.cmds(uuid)
+        local out = {}
+        for _, m in ipairs(env.sent_to(uuid)) do out[#out + 1] = m.args[1] end
+        return out
+    end
+    function env.start() local ok, err = sdminer.start(); return ok, err end
+    function env.run_until_dispatch()   -- tick until the first dispatch pass has happened
+        for _ = 1, 30 do env.tick(1); if sdminer._state().phase ~= "cleaning" then break end end
+    end
+    function env.done() rawset(component, "modem", modem); listings = {} end
+    return env
+end
+
+test("miner: tier is the first number in the reported GT name", function()
+    eq(sdminer.extract_tier("multimachine.miner.t3"), 3); eq(sdminer.extract_tier("T 12 Miner"), 12)
+    eq(sdminer.extract_tier("unknown_gt_device"), 1); eq(sdminer.extract_tier(nil), 1)
+end)
+
+test("miner: not available without a transposer; summary says why; refresh does nothing", function()
+    local env = miner_env({ no_transposer = true, items = { miner_item("Ore", 1000) } })
+    local ok, err = env.start()
+    eq(ok, false); truthy(err:find("transposer", 1, true))
+    eq(sdminer.is_active(), false); eq(sdminer.refresh_now(), false)
+    local text, active = sdminer.summary(true)
+    truthy(text:find("未啟用", 1, true)); eq(active, false)
+    eq((sdminer.summary(false)), nil, "nothing to show when no miner items")
+    env.done()
+end)
+
+test("miner: start opens the port, listens, broadcasts REG_RESET at miner strength and restores the old strength", function()
+    local env = miner_env({ items = { miner_item("Ore", 1000) } })
+    eq(env.start(), true)
+    local opened = false
+    for _, o in ipairs(OPENED) do if o.port == 300 then opened = true end end
+    truthy(opened, "port 300 opened"); truthy(listeners.modem_message, "listener registered")
+    env.tick(1)
+    local b = env.mm.sent[1]
+    truthy(b and b.broadcast and b.args[1] == "REG_RESET" and b.port == 300)
+    eq(b.strength, 16, "sent at miner strength"); eq(env.mm.strength, 400, "previous strength restored")
+    env.done()
+end)
+
+test("miner: registration replies REG_SUCCESS - also for known miners and during cooldown", function()
+    local env = miner_env({ items = { miner_item("Ore", 1000) } })
+    env.start()
+    env.register("miner-aaaa", "multimachine.miner.t2")
+    eq(sdminer._state().miners["miner-aaaa"].tier, 2)
+    env.register("miner-aaaa", "multimachine.miner.t4")                 -- rebooted miner registers again
+    eq(sdminer._state().miners["miner-aaaa"].tier, 4)
+    local success = 0
+    for _, m in ipairs(env.sent_to("miner-aaaa")) do if m.args[1] == "REG_SUCCESS" then success = success + 1 end end
+    eq(success, 2, "original only answered the first registration")
+    sdminer._state().phase = "cooldown"; sdminer._state().cooldown_until = 1e9
+    env.register("miner-bbbb", "t1")
+    truthy(sdminer._state().miners["miner-bbbb"], "new miner accepted during cooldown")
+    env.done()
+end)
+
+test("miner: stage 1 assigns the highest drone inside the level range (slot is 1-based)", function()
+    local env = miner_env({
+        items = { miner_item("Ore", 1000, { min_drone_tier = 3, max_drone_tier = 5 }) }, stock = { Ore = 400 },
+        chest = { [0] = drone(4, 2), [3] = drone(5, 1), [4] = drone(9, 5), [6] = drone(3, 3) },
+    })
+    env.start(); env.register("m1", "t1")
+    env.run_until_dispatch(); env.tick(3)
+    local cmds = env.sent_to("m1")
+    local set, push
+    for _, m in ipairs(cmds) do
+        if m.args[1] == "SET_MACHINE" then set = m end
+        if m.args[1] == "PUSH_MATERIAL" then push = m end
+    end
+    truthy(set and push, "both commands sent")
+    eq(set.args[2], 0); eq(set.args[3], 0); eq(set.args[4], 91); eq(set.port, 300); eq(set.strength, 16)
+    eq(push.args[2], 4, "level-5 drone sits in 0-based index 3 -> slot 4"); eq(push.args[3], 1)
+    local order = env.cmds("m1")
+    local si, pi
+    for i, c in ipairs(order) do if c == "SET_MACHINE" then si = i elseif c == "PUSH_MATERIAL" then pi = i end end
+    truthy(si < pi, "SET_MACHINE before PUSH_MATERIAL")
+    local st = sdminer.status("Ore")
+    eq(st.assigned, 1); eq(st.needed, 1); eq(st.reason, nil)
+    env.done()
+end)
+
+test("miner: the recipe field names are min_drone_tier / max_drone_tier (a level outside the range is never used in strict mode)", function()
+    local env = miner_env({
+        items = { miner_item("Ore", 1000, { min_drone_tier = 7, max_drone_tier = 12 }) }, stock = { Ore = 100 },
+        chest = { [0] = drone(3, 4), [1] = drone(5, 4) },
+    })
+    env.start(); env.register("m1", "t1")
+    env.run_until_dispatch(); env.tick(3)
+    eq(#env.sent_to("m1"), 1, "only REG_SUCCESS - nothing pushed")
+    eq(sdminer.status("Ore").reason, "no_drone"); eq(sdminer.status("Ore").assigned, 0)
+    env.done()
+end)
+
+test("miner: number of miners = ceil(shortage ratio * weight); later passes do not add more", function()
+    local items = { miner_item("Ore", 1000, { weight = 5 }) }
+    local env = miner_env({ items = items, stock = { Ore = 500 }, chest = { [0] = drone(4, 20) } })
+    env.start()
+    for i = 1, 5 do env.register("m" .. i, "t1") end
+    env.run_until_dispatch(); env.tick(8)
+    local busy = 0
+    for _, st in pairs(sdminer._state().miners) do if st.busy then busy = busy + 1 end end
+    eq(busy, 3, "ceil(0.5 * 5)")
+    eq(sdminer.status("Ore").needed, 3)
+    env.tick(30)                                     -- many more dispatch passes
+    busy = 0
+    for _, st in pairs(sdminer._state().miners) do if st.busy then busy = busy + 1 end end
+    eq(busy, 3, "miners already on the item count towards the need")
+    env.done()
+end)
+
+test("miner: drones are reserved within a pass (a stack of 2 is never handed out 3 times)", function()
+    local env = miner_env({ items = { miner_item("Ore", 1000, { weight = 5 }) }, stock = { Ore = 0 }, chest = { [0] = drone(4, 2) } })
+    env.start()
+    for i = 1, 5 do env.register("m" .. i, "t1") end
+    env.run_until_dispatch(); env.tick(8)
+    local pushes = 0
+    for _, m in ipairs(env.mm.sent) do if m.args[1] == "PUSH_MATERIAL" then pushes = pushes + 1 end end
+    eq(pushes, 2); eq(sdminer.status("Ore").reason, "no_drone"); eq(sdminer.status("Ore").assigned, 2)
+    eq(sdminer._state().drones, 0)
+    eq(sdminer._state().phase, "cooldown", "no drones left -> saturated -> cooldown")
+    env.done()
+end)
+
+test("miner: min_miner_tier is checked against the tier parsed from the GT name", function()
+    local env = miner_env({ items = { miner_item("Ore", 1000, { min_miner_tier = 2 }) }, stock = { Ore = 0 }, chest = { [0] = drone(4, 5) } })
+    env.start(); env.register("low", "t1"); env.register("high", "t3")
+    env.run_until_dispatch(); env.tick(4)
+    truthy(sdminer._state().miners.high.busy); truthy(not sdminer._state().miners.low.busy)
+    env.done()
+    local env2 = miner_env({ items = { miner_item("Ore", 1000, { min_miner_tier = 5 }) }, stock = { Ore = 0 }, chest = { [0] = drone(4, 5) } })
+    sdminer._reset(); env2.start(); env2.register("low", "t1")
+    env2.run_until_dispatch(); env2.tick(2)
+    eq(sdminer.status("Ore").reason, "no_miner")
+    env2.done()
+end)
+
+test("miner: stage 2 gives idle miners the limit=1 items that are already satisfied (fallback drone allowed)", function()
+    local env = miner_env({
+        items = { miner_item("Full", 1000, { limit = 1, min_drone_tier = 3, max_drone_tier = 5 }), miner_item("Full0", 1000, { limit = 0 }) },
+        stock = { Full = 5000, Full0 = 5000 }, chest = { [2] = drone(9, 3) },      -- only an out-of-range drone
+    })
+    env.start(); env.register("m1", "t1"); env.register("m2", "t1")
+    env.run_until_dispatch(); env.tick(6)
+    eq(sdminer._state().miners.m1.item, "Full"); eq(sdminer._state().miners.m2.item, "Full")
+    eq(sdminer.status("Full").assigned, 2); eq(sdminer.status("Full0").assigned, 0, "limit=0 items never get idle miners")
+    local push
+    for _, m in ipairs(env.sent_to("m1")) do if m.args[1] == "PUSH_MATERIAL" then push = m end end
+    eq(push.args[2], 3, "fallback drone from slot index 2 -> slot 3")
+    env.done()
+end)
+
+test("miner: strict stage-1 items never take a fallback drone, stage 2 can", function()
+    local env = miner_env({
+        items = { miner_item("Need", 1000, { limit = 1, min_drone_tier = 7, max_drone_tier = 9 }) },
+        stock = { Need = 10 }, chest = { [0] = drone(2, 3) },
+    })
+    env.start(); env.register("m1", "t1")
+    env.run_until_dispatch(); env.tick(4)
+    eq(sdminer._state().miners.m1.busy, false, "needy item must not be fed a wrong-level drone")
+    env.done()
+end)
+
+test("miner: when miners/drones are short, the item with the biggest shortage ratio is served first", function()
+    local env = miner_env({
+        items = { miner_item("Mild", 1000), miner_item("Severe", 1000) },      -- config order puts Mild first
+        stock = { Mild = 800, Severe = 100 }, chest = { [0] = drone(4, 1) },
+    })
+    env.start(); env.register("m1", "t1")
+    env.run_until_dispatch(); env.tick(4)
+    eq(sdminer._state().miners.m1.item, "Severe")
+    eq(sdminer.status("Mild").reason, "no_miner", "the other item reports why it got nothing")
+    env.done()
+end)
+
+test("miner: AE query failure -> no assignment for that item", function()
+    local env = miner_env({ items = { miner_item("Ore", 1000) }, ae_down = true, chest = { [0] = drone(4, 5) } })
+    env.start(); env.register("m1", "t1")
+    env.run_until_dispatch(); env.tick(4)
+    eq(sdminer.status("Ore").reason, "query"); eq(sdminer._state().miners.m1.busy, false)
+    env.done()
+end)
+
+test("miner: commands are sent at most miner_msgs_per_tick per second and the chest is not re-read before they are delivered", function()
+    local env = miner_env({ items = { miner_item("Ore", 1000, { weight = 6 }) }, stock = { Ore = 0 }, chest = { [0] = drone(4, 30) } })
+    env.start()
+    for i = 1, 12 do env.register("m" .. i, "t1") end            -- 6 needed of 12 -> never saturated -> several passes
+    env.run_until_dispatch()
+    local scans = {}
+    local orig = env.tp.getAllStacks
+    env.tp.getAllStacks = function(...)
+        local st = sdminer._state()
+        scans[#scans + 1] = { queued = #st.queue, since_send = env.ctx.now - st.last_send }
+        return orig(...)
+    end
+    local per_tick, last = {}, #env.mm.sent
+    for _ = 1, 40 do
+        env.tick(1)
+        per_tick[#per_tick + 1] = #env.mm.sent - last
+        last = #env.mm.sent
+    end
+    for _, n in ipairs(per_tick) do truthy(n <= 4, "<= 4 messages per tick, got " .. n) end
+    truthy(#scans >= 1, "dispatch passes happened")
+    for _, sc in ipairs(scans) do
+        eq(sc.queued, 0, "chest is only read when nothing is queued")
+        truthy(sc.since_send >= 2, "and after the settle time, got " .. sc.since_send)
+    end
+    env.done()
+end)
+
+test("miner: saturation -> cooldown -> global clean (PULL_BACK) -> new cycle", function()
+    local env = miner_env({ items = { miner_item("Ore", 1000) }, stock = { Ore = 0 }, chest = { [0] = drone(4, 5) } })
+    env.start(); env.register("m1", "t1")
+    env.run_until_dispatch(); env.tick(5)
+    eq(sdminer._state().phase, "cooldown", "all miners busy")
+    local text = sdminer.summary(true)
+    truthy(text:find("冷卻", 1, true) and text:find("忙碌 1", 1, true), text)
+    env.ctx.now = sdminer._state().cooldown_until - 1; env.tick(1)       -- cooldown over (this tick enqueues and sends PULL_BACK)
+    local pulled = false
+    for _, c in ipairs(env.cmds("m1")) do if c == "PULL_BACK" then pulled = true end end
+    truthy(pulled, "PULL_BACK sent to every miner")
+    eq(sdminer._state().miners.m1.busy, false); eq(sdminer.status("Ore"), nil)
+    env.tick(10)
+    truthy(sdminer._state().phase ~= "cleaning", "back to dispatching")
+    env.done()
+end)
+
+test("miner: manual refresh button (refresh_now) recycles immediately, even during cooldown", function()
+    local env = miner_env({ items = { miner_item("Ore", 1000) }, stock = { Ore = 0 }, chest = { [0] = drone(4, 5) } })
+    env.start(); env.register("m1", "t1")
+    env.run_until_dispatch(); env.tick(5)
+    eq(sdminer._state().phase, "cooldown")
+    eq(sdminer.refresh_now(), true)
+    env.tick(1)
+    local pulled = false
+    for _, c in ipairs(env.cmds("m1")) do if c == "PULL_BACK" then pulled = true end end
+    truthy(pulled); eq(sdminer._state().miners.m1.busy, false)
+    env.done()
+end)
+
+test("miner: an unsaturated cycle is refreshed after miner_cooldown seconds", function()
+    local env = miner_env({ items = { miner_item("Ore", 1000) }, stock = { Ore = 5000 }, chest = { [0] = drone(4, 5) } })
+    env.start(); env.register("m1", "t1")
+    env.run_until_dispatch(); env.tick(5)
+    eq(sdminer._state().phase, "dispatch", "nothing to do, miner idle -> keeps watching the stock")
+    env.ctx.now = sdminer._state().cycle_started + 301; env.tick(1)
+    local pulled = false
+    for _, c in ipairs(env.cmds("m1")) do if c == "PULL_BACK" then pulled = true end end
+    truthy(pulled, "periodic refresh")
+    env.done()
+end)
+
+test("miner: stock that drops later triggers an assignment in a following pass", function()
+    local env = miner_env({ items = { miner_item("Ore", 1000) }, stock = { Ore = 5000 }, chest = { [0] = drone(4, 5) } })
+    env.start(); env.register("m1", "t1")
+    env.run_until_dispatch(); env.tick(5)
+    eq(sdminer._state().miners.m1.busy, false)
+    env.stock.Ore = 100
+    env.tick(8)
+    eq(sdminer._state().miners.m1.busy, true)
+    env.done()
+end)
+
+test("miner: stop() removes the listener; the miners are left alone", function()
+    local env = miner_env({ items = { miner_item("Ore", 1000) } })
+    env.start()
+    truthy(listeners.modem_message)
+    sdminer.stop()
+    eq(listeners.modem_message, nil); eq(sdminer.is_active(), false)
+    env.done()
+end)
+
+-- ========== miner config validation + page 2 display ==========
+test("config: miner entries - defaults, and every invalid field is reported", function()
+    cfg_items({
+        { name = "a", damage = 0, label = "Min", mode_tag = "miner", target_quantity = 100, distance = 91 },
+        { name = "a", damage = 0, label = "NoDist", mode_tag = "miner", target_quantity = 100 },
+        { name = "a", damage = 0, label = "NoTarget", mode_tag = "miner", target_quantity = 0, distance = 1 },
+        { name = "a", damage = 0, label = "BadWeight", mode_tag = "miner", target_quantity = 5, distance = 1, weight = 0 },
+        { name = "a", damage = 0, label = "BadLimit", mode_tag = "miner", target_quantity = 5, distance = 1, limit = 2 },
+        { name = "a", damage = 0, label = "BadRange", mode_tag = "miner", target_quantity = 5, distance = 1, min_drone_tier = 6, max_drone_tier = 3 },
+        { name = "a", damage = 0, label = "BadMinerTier", mode_tag = "miner", target_quantity = 5, distance = 1, min_miner_tier = 0 },
+        { name = "a", damage = 0, label = "Full", mode_tag = "miner", target_quantity = 50, distance = 12.5, weight = 2.5, limit = 1,
+          min_miner_tier = 3, min_drone_tier = 4, max_drone_tier = 8 },
+    })
+    local items, errs = sdlogic.load_hybrid_config()
+    eq(#items, 2); eq(#errs, 6)
+    local d = items[1]
+    eq(d.mode_tag, "miner"); eq(d.min_miner_tier, 1); eq(d.min_drone_tier, 0); eq(d.max_drone_tier, 99)
+    eq(d.weight, 1); eq(d.limit, 0); eq(d.distance, 91); eq(d.target_once, 0)
+    local f = items[2]
+    eq(f.min_miner_tier, 3); eq(f.min_drone_tier, 4); eq(f.max_drone_tier, 8); eq(f.weight, 2.5); eq(f.limit, 1); eq(f.distance, 12.5)
+end)
+
+test("page 2: miner rows show working / missing drones / resident / not enabled, plus the summary line", function()
+    local env = miner_env({
+        items = { miner_item("Working", 1000, { weight = 5 }), miner_item("Starved", 1000, { min_drone_tier = 20, max_drone_tier = 30 }),
+                  miner_item("Resident", 1000, { limit = 1 }), miner_item("Plain", 1000) },
+        stock = { Working = 500, Starved = 0, Resident = 9000, Plain = 9000 }, chest = { [0] = drone(4, 30) },
+    })
+    env.start()
+    for i = 1, 5 do env.register("m" .. i, "t1") end
+    env.run_until_dispatch(); env.tick(12)
+    local ctx = env.ctx
+    ctx.gpu = make_gpu()
+    sdlogic.render_page2()
+    local function row(label)
+        for y = 16, 20 do local r = row_text(ctx.gpu, y); if r and r:find(label, 1, true) then return r end end
+    end
+    truthy(row("Working"):find("開採中 3/3", 1, true), row("Working"))
+    truthy(row("Starved"):find("缺無人機", 1, true), row("Starved"))
+    truthy(row("Resident"):find("常駐", 1, true), row("Resident"))
+    truthy(row("Plain"):find("庫存充裕安全", 1, true))
+    local summary = row_text(ctx.gpu, 9)
+    truthy(summary:find("礦機 5 台", 1, true), summary)
+    truthy(read(ctx.log_file_path):find("Working=8=3=0", 1, true), "log tag 8 = mining")
+    truthy(read(ctx.log_file_path):find("Starved=9=", 1, true), "log tag 9 = waiting")
+    env.done()
+end)
+
+test("page 2: miner item while the module is off -> clear warning, not a crash", function()
+    local env = miner_env({ no_transposer = true, items = { miner_item("Ore", 1000) }, stock = { Ore = 0 } })
+    env.start()
+    local ctx = env.ctx
+    ctx.gpu = make_gpu()
+    sdlogic.render_page2()
+    truthy(row_text(ctx.gpu, 16):find("礦機模組未啟用", 1, true))
+    truthy(row_text(ctx.gpu, 9):find("未啟用", 1, true))
+    env.done()
+end)
+
+test("page 2: no miner items and no miners -> row 9 stays empty", function()
+    cfg_items({ restock("Iron") })
+    local ctx = make_ctx()
+    render(ctx, 5000)
+    truthy(row_text(ctx.gpu, 9):match("^%s*$") ~= nil)
+end)
+
 -- ========== touch_menu: module wiring ==========
-local function load_real_menu(with_database)
+local function load_real_menu(with_database, extra)
     package.loaded.touch_menu = nil
     avail = { modem = true, database = with_database or false }
     listings = { ["6429-gpu"] = "gpu", ["a875-scr"] = "screen" }
+    for addr, spec in pairs(extra or {}) do listings[addr] = spec.type end
     local gpu = make_gpu()
     local order = {}
     gpu.bind = function() order[#order + 1] = "bind" end
@@ -1090,6 +1496,7 @@ local function load_real_menu(with_database)
     local saved_proxy = component.proxy
     component.proxy = function(addr)
         if addr == "6429-gpu" then return gpu end
+        if extra and extra[addr] then return extra[addr].proxy end
         return { address = addr }
     end
     rawset(component, "gpu", gpu)
@@ -1201,6 +1608,40 @@ test("touch_menu: scan failure is shown, not thrown", function()
     menu.handle_touch(40, 4); menu.handle_touch(120, 4)
     truthy(menu.scan_message.text:find("失敗", 1, true))
     eq(read(path), "{ broken", "broken file untouched")
+    menu.stop()
+    cleanup()
+end)
+
+
+test("touch_menu: with a transposer + modem the miner module starts and the button asks for a refresh", function()
+    local chest = make_chest({ [0] = drone(4, 3) })
+    local ok, menu, gpu, order, cleanup = load_real_menu(false, { ["tp00-xx"] = { type = "transposer", proxy = chest }, ["mo00-xx"] = { type = "modem", proxy = {} } })
+    truthy(ok, "require failed: " .. tostring(menu))
+    eq(menu.miner_transposer, chest); eq(menu.miner_port, 300); eq(menu.miner_chest_side, 2)
+    menu.config_file_path = TMP_DIR .. "/menu_cfg5.json"
+    os.remove(menu.config_file_path)
+    menu.start()
+    eq(sdminer.is_active(), true)
+    local opened = false
+    for _, o in ipairs(OPENED) do if o.port == 300 then opened = true end end
+    truthy(opened)
+    menu.handle_touch(40, 4)                      -- AE2 page
+    menu.handle_touch(145, 4)                     -- miner re-dispatch button
+    truthy(menu.scan_message.text:find("重新分配", 1, true), menu.scan_message.text)
+    menu.stop()
+    eq(sdminer.is_active(), false)
+    cleanup()
+end)
+
+test("touch_menu: without a transposer the miner button explains why instead of failing", function()
+    local ok, menu, gpu, order, cleanup = load_real_menu(false)
+    truthy(ok)
+    eq(menu.miner_transposer, nil)
+    menu.config_file_path = TMP_DIR .. "/menu_cfg6.json"
+    menu.start()
+    eq(sdminer.is_active(), false)
+    menu.handle_touch(40, 4); menu.handle_touch(145, 4)
+    truthy(menu.scan_message.text:find("未啟用", 1, true))
     menu.stop()
     cleanup()
 end)

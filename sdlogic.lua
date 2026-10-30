@@ -90,7 +90,7 @@ end
 -- 每筆物品直接存 name / damage / label (方便查詢)。database 只用來「新增物品」：
 -- 初始化時與按下掃描鍵時，把 database 裡還沒登記的物品加進 JSON。
 -- ========================================================
-local MODES = { restock = true, clone = true, monitor = true }
+local MODES = { restock = true, clone = true, monitor = true, miner = true }
 local parse_cache = { path = nil, mtime = nil, data = nil, checked_at = nil }
 local built_cache = { data = nil, items = nil, errors = nil }
 local last_good = nil
@@ -167,7 +167,7 @@ local function build_entry(raw, index, seen)
     if seen[key] then return nil, tag .. ": 重複的 label (AE2 只用 label 搜尋，同一個 label 只能登錄一次)" end
 
     local mode = val(raw.mode_tag)
-    if not MODES[mode or ""] then return nil, tag .. ": mode_tag 必須是 restock / clone / monitor" end
+    if not MODES[mode or ""] then return nil, tag .. ": mode_tag 必須是 restock / clone / monitor / miner" end
 
     local target = val(raw.target_quantity)
     local once = val(raw.target_once)
@@ -184,6 +184,34 @@ local function build_entry(raw, index, seen)
     if cooldown ~= nil and (type(cooldown) ~= "number" or cooldown < 0) then
         return nil, tag .. ": cooldown 必須是數字 (>=0) 或省略"
     end
+    -- 礦機模式 (參數沿用 space_recipe.lua；target_amount 就是 target_quantity)
+    local miner
+    if mode == "miner" then
+        if target <= 0 then return nil, tag .. ": miner 需要 target_quantity > 0" end
+        local function int_field(key, default, lo)
+            local v = val(raw[key])
+            if v == nil then return default end
+            if is_int(v) and v >= lo then return v end
+            return nil
+        end
+        local min_miner_tier = int_field("min_miner_tier", 1, 1)
+        if not min_miner_tier then return nil, tag .. ": min_miner_tier 必須是 >=1 的整數" end
+        local min_drone_tier = int_field("min_drone_tier", 0, 0)
+        if not min_drone_tier then return nil, tag .. ": min_drone_tier 必須是 >=0 的整數" end
+        local max_drone_tier = int_field("max_drone_tier", 99, min_drone_tier)
+        if not max_drone_tier then return nil, tag .. ": max_drone_tier 必須是 >= min_drone_tier 的整數" end
+        local distance = val(raw.distance)
+        if type(distance) ~= "number" or distance < 0 then return nil, tag .. ": miner 需要 distance (數字)" end
+        local weight = val(raw.weight)
+        if weight == nil then weight = 1 end
+        if type(weight) ~= "number" or weight <= 0 then return nil, tag .. ": weight 必須是 >0 的數字" end
+        local limit = val(raw.limit)
+        if limit == nil then limit = 0 end
+        if limit ~= 0 and limit ~= 1 then return nil, tag .. ": limit 只能是 0 或 1" end
+        miner = { min_miner_tier = min_miner_tier, min_drone_tier = min_drone_tier, max_drone_tier = max_drone_tier,
+                  distance = distance, weight = weight, limit = limit }
+    end
+
     local circuit, priority = nil, 9
     if mode == "clone" then
         circuit = val(raw.circuit)
@@ -195,11 +223,13 @@ local function build_entry(raw, index, seen)
         end
     end
     seen[key] = true
-    return {
+    local entry = {
         key = key, name = name, damage = damage, label = label,
         target_quantity = target, target_once = once, cooldown = cooldown,
         mode_tag = mode, circuit = circuit, priority = priority,
     }
+    if miner then for k, v in pairs(miner) do entry[k] = v end end
+    return entry
 end
 
 -- 回傳 items, errors。設定有問題的項目會被略過並列在 errors，絕不丟出例外。
@@ -522,6 +552,16 @@ function sdlogic.render_page2()
         put(6, 12, string.rep(" ", 150), 0xFFFFFF)
     end
 
+    -- 礦機摘要 (第 9 列)：有 miner 物品或有礦機上線時才顯示
+    local has_miner_items = false
+    for _, it in ipairs(monitor_items) do if it.mode_tag == "miner" then has_miner_items = true break end end
+    local miner_text, miner_ok = require("sdminer").summary(has_miner_items)
+    if miner_text then
+        put(6, 9, fit(miner_text, 150), miner_ok and 0x55AFFF or 0xFF5555)
+    else
+        put(6, 9, string.rep(" ", 150), 0xFFFFFF)
+    end
+
     -- 如果設定檔是空的或不存在，提示一下
     if #monitor_items == 0 then
         ctx.list_page, ctx.list_pages = 1, 1
@@ -601,6 +641,45 @@ function sdlogic.render_page2()
             color = 0xFF5555
             status_msg = "[⚠️ AE查詢失敗]"
             tag1 = 7
+        elseif item_info.mode_tag == "miner" then
+            -- 礦機模式：庫存不足時由 sdminer 把無人機派給礦機電腦，這裡只負責顯示狀態
+            local sdminer = require("sdminer")
+            local st = sdminer.status(item_name) or {}
+            local assigned = st.assigned or 0
+            if not sdminer.is_active() then
+                color = 0xFF5555
+                status_msg = "[⚠️ 礦機模組未啟用]"
+                tag1 = 9
+            elseif count >= item_info.target_quantity then
+                if assigned > 0 then
+                    color = 0x55AFFF
+                    status_msg = string.format("[⛏ 常駐 %d台]", assigned)
+                    tag1, tag2 = 8, assigned
+                else
+                    color = 0xFFFFFF
+                    status_msg = "[✅庫存充裕安全]"
+                end
+            else
+                local ratio = (item_info.target_quantity - count) / item_info.target_quantity
+                local needed = st.needed or math.ceil(ratio * item_info.weight)
+                if assigned >= needed then
+                    color = 0x00FF00
+                    status_msg = string.format("[⛏ 開採中 %d/%d台]", assigned, needed)
+                    tag1, tag2 = 8, assigned
+                elseif st.reason == "no_drone" then
+                    color = 0xFFAA00
+                    status_msg = string.format("[⚠️ 缺無人機 %d/%d]", assigned, needed)
+                    tag1, tag2 = 9, needed
+                elseif st.reason == "no_miner" then
+                    color = 0xFFAA00
+                    status_msg = string.format("[⚠️ 缺礦機 %d/%d]", assigned, needed)
+                    tag1, tag2 = 9, needed
+                else
+                    color = 0xFFEE00
+                    status_msg = string.format("[⏳ 等待調度 %d/%d]", assigned, needed)
+                    tag1, tag2 = 9, needed
+                end
+            end
         elseif is_special_mode or (item_info.mode_tag == "restock" and count < item_info.target_quantity) then
             -- 狀況甲：特殊複製模式
             if is_special_mode then
