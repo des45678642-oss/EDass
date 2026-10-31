@@ -52,6 +52,10 @@ while not registered do
         if port == PORT and cmd == "REG_SUCCESS" then
             registered = true
 			print("註冊完成")
+		elseif port == PORT and cmd == "REG_RESET" then
+			modem.broadcast(PORT, "MINER_REGISTER", gt_name)
+			registered = true
+			print("註冊完成")
         end
     end
 end
@@ -135,7 +139,9 @@ while true do
                     local success, err = pcall(comp.invoke, current_gt_addr, "setParameters", hatch, id, value)
                     if success then print("成功！") else print("失敗原因: " .. tostring(err)) end
                 end
-            elseif cmd == "REG_RESET" then modem.broadcast(PORT, "MINER_REGISTER", gt_name) end
+            elseif
+				cmd == "REG_RESET" then modem.broadcast(PORT, "MINER_REGISTER", gt_name)
+			end
         end
     end
 end

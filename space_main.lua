@@ -22,7 +22,7 @@ local recipes = require("space_recipe")
 local online_miners = {}
 
 -- 共享終界箱物理方向
-local SIDE_SHARED_ENDER_CHEST = 2
+local SIDE_SHARED_ENDER_CHEST = 1
 
 -- 模擬從外部 database 查詢物品當前庫存量
 local function getInventoryStockFromDatabase(item_name)
