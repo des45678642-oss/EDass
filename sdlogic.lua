@@ -456,6 +456,13 @@ function sdlogic.count_item(entry, ae)
     ae = ae or main().ae
     if not ae then return nil, "找不到 ME 介面" end
     if entry.fluid then
+        -- 單一流體：getFluidInNetwork({name=...}) 回傳 {amount, size, label, name, ...}，找不到時回 nil / 空表
+        if ae.getFluidInNetwork then
+            local ok, fl = pcall(ae.getFluidInNetwork, { name = entry.fluid })
+            if ok and (fl == nil or type(fl) == "table") then
+                return (fl and (fl.amount or fl.size)) or 0
+            end
+        end
         local sums, e = sdlogic.fluid_totals(ae)
         if not sums then return nil, e end
         return sums[entry.fluid] or sums[entry.label] or 0

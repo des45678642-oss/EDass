@@ -1694,6 +1694,18 @@ test("count_item: fluids are summed in mB from getFluidsInNetwork by registry na
     eq(n2, nil)
 end)
 
+test("count_item: a single fluid uses getFluidInNetwork({name=}) and falls back to the full list", function()
+    local seen
+    local ae = { getFluidInNetwork = function(f) seen = f; return { amount = 111, size = 111, label = "UU-Matter", name = "ic2uumatter" } end,
+                 getFluidsInNetwork = function() error("full list must not be needed") end }
+    eq(sdlogic.count_item({ label = "UU-Matter", fluid = "ic2uumatter" }, ae), 111); eq(seen.name, "ic2uumatter")
+    ae.getFluidInNetwork = function() return nil end
+    eq(sdlogic.count_item({ label = "UU-Matter", fluid = "ic2uumatter" }, ae), 0, "absent fluid is 0")
+    ae.getFluidInNetwork = function() error("not supported") end
+    ae.getFluidsInNetwork = function() return { { name = "ic2uumatter", amount = 42 } } end
+    eq(sdlogic.count_item({ label = "UU-Matter", fluid = "ic2uumatter" }, ae), 42, "error falls back")
+end)
+
 test("query_counts: fluids are fetched with a single call whatever the query mode", function()
     local fcalls, icalls = 0, {}
     local ae = {
