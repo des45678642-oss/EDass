@@ -44,7 +44,7 @@ local query_full_threshold    = 8        -- auto 模式下，物品超過幾個�
 local miner_port              = 300      -- 與 space_miner.lua 約定的通訊埠
 local miner_strength          = 16       -- 對礦機發信的強度 (送完會還原成原本的強度)
 local miner_transposer_address = nil     -- 轉運器位址前綴；nil = 用預設那台
-local miner_chest_side        = 2        -- 轉運器貼著共享終界箱的方向
+local miner_chest_side        = 1        -- 轉運器貼著共享終界箱的方向
 local drone_item_name         = "gtnhintergalactic:item.MiningDrone"
 local miner_cooldown          = 300      -- 飽和後的冷卻(秒)，到期全廠回收重新分配；一輪最長也是這個時間
 local miner_dispatch_interval = 5        -- 每隔幾秒做一輪分配
@@ -121,8 +121,10 @@ local db = nil
 if component.isAvailable("database") then db = component.database end
 local SCR_W, SCR_H = 160, 50
 
+-- GTNH 2.9 之後物品與流體都要從 fluid_interface 查；舊版沒有它就退回 me_interface / me_controller
 local ae = nil
-if component.isAvailable("me_interface") then ae = component.me_interface
+if component.isAvailable("fluid_interface") then ae = component.fluid_interface
+elseif component.isAvailable("me_interface") then ae = component.me_interface
 elseif component.isAvailable("me_controller") then ae = component.me_controller end
 
 local function get_now_time()

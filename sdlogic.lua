@@ -166,7 +166,15 @@ local function build_entry(raw, index, seen)
     local key = label
     if seen[key] then return nil, tag .. ": 重複的 label (AE2 只用 label 搜尋，同一個 label 只能登錄一次)" end
 
+    local fluid = val(raw.fluid)
+    if fluid ~= nil and (type(fluid) ~= "string" or fluid == "") then
+        return nil, tag .. ": fluid 必須是流體的註冊名稱 (非空字串) 或省略"
+    end
+
     local mode = val(raw.mode_tag)
+    if fluid and mode ~= nil and mode ~= "monitor" then
+        return nil, tag .. ": 流體目前只支援 monitor"
+    end
     if not MODES[mode or ""] then return nil, tag .. ": mode_tag 必須是 restock / clone / monitor / miner" end
 
     local target = val(raw.target_quantity)
@@ -224,7 +232,7 @@ local function build_entry(raw, index, seen)
     end
     seen[key] = true
     local entry = {
-        key = key, name = name, damage = damage, label = label,
+        key = key, name = name, damage = damage, label = label, fluid = fluid,
         target_quantity = target, target_once = once, cooldown = cooldown,
         mode_tag = mode, circuit = circuit, priority = priority,
     }
@@ -308,12 +316,28 @@ local function read_for_edit(path)
     return data
 end
 
+-- database 裡的流體顯示物 (NEI): name = NotEnoughItems:neiFluidDisplay，流體資訊在 stack.fluid
+-- ({amount, id, label, name})；一般物品的 fluid 是空表。
+local FLUID_DISPLAY = "NotEnoughItems:neiFluidDisplay"
+local function stack_fluid(stack)
+    if stack.name == FLUID_DISPLAY and type(stack.fluid) == "table"
+        and type(stack.fluid.name) == "string" and stack.fluid.name ~= "" then
+        return stack.fluid
+    end
+end
+
+-- 回傳 stack, fluid。流體的 label 以 fluid.label 為準 (AE2 流體查詢用的就是流體自己的名稱)
 local function db_stack(db, slot)
     local ok, stack = pcall(db.get, slot)
-    if ok and type(stack) == "table" and type(stack.label) == "string" and stack.label ~= ""
-        and type(stack.name) == "string" and stack.name ~= "" then
-        return stack
+    if not ok or type(stack) ~= "table" or type(stack.name) ~= "string" or stack.name == "" then return end
+    local f = stack_fluid(stack)
+    if f then
+        local label = f.label
+        if type(label) ~= "string" or label == "" then label = stack.label end
+        if type(label) ~= "string" or label == "" then return end
+        return { name = stack.name, damage = stack.damage, label = label }, f
     end
+    if type(stack.label) == "string" and stack.label ~= "" then return stack end
 end
 
 -- 舊格式 (只有 slot) 的項目：用 database 補上 name/damage/label 並移除 slot。回傳 轉換筆數, 錯誤
@@ -333,9 +357,10 @@ function sdlogic.migrate_legacy_slots()
     local changed = 0
     for _, raw in ipairs(data.items) do
         if type(raw) == "table" and val(raw.label) == nil and is_int(val(raw.slot)) then
-            local stack = db_stack(db, raw.slot)
+            local stack, f = db_stack(db, raw.slot)
             if stack then
                 raw.name, raw.damage, raw.label = stack.name, stack.damage or 0, stack.label
+                if f then raw.fluid = f.name end
                 raw.slot = nil
                 changed = changed + 1
             end
@@ -371,16 +396,18 @@ function sdlogic.scan_database()
 
     local added, skipped, skipped_seen = {}, {}, {}
     for slot = 1, (m.database_slots or 81) do
-        local stack = db_stack(db, slot)
+        local stack, f = db_stack(db, slot)
         if stack then
             local damage = stack.damage or 0
             local have = known[stack.label]
             if not have then
                 known[stack.label] = { name = stack.name, damage = damage }
-                data.items[#data.items + 1] = {
+                local entry = {
                     name = stack.name, damage = damage, label = stack.label,
                     mode_tag = "monitor", target_quantity = 0,
                 }
+                if f then entry.fluid = f.name end
+                data.items[#data.items + 1] = entry
                 added[#added + 1] = stack.label
             elseif (have.name ~= stack.name or have.damage ~= damage) and not skipped_seen[stack.label] then
                 skipped_seen[stack.label] = true
@@ -408,10 +435,31 @@ function sdlogic.init_config()
     return table.concat(msgs, "；"), had_error
 end
 
+-- 流體總量 (mB)：getFluidsInNetwork() 一次回傳整個網路的流體，依註冊名稱 (name) 與 label 各加總。
+-- 回傳 sums(鍵為 name 或 label → mB)；失敗回傳 nil, 錯誤訊息
+function sdlogic.fluid_totals(ae)
+    if not ae or not ae.getFluidsInNetwork then return nil, "此 ME 組件不支援流體查詢 (需要 fluid_interface)" end
+    local ok, all = pcall(ae.getFluidsInNetwork)
+    if not ok or type(all) ~= "table" then return nil, "AE2 流體查詢失敗" end
+    local by_name, by_label = {}, {}
+    for _, fl in ipairs(all) do
+        local amount = fl.amount or fl.size or 0
+        if fl.name then by_name[fl.name] = (by_name[fl.name] or 0) + amount end
+        if fl.label then by_label[fl.label] = (by_label[fl.label] or 0) + amount end
+    end
+    -- 先查註冊名稱，沒有再退回 label (兩者不會互相覆蓋：name 優先)
+    return setmetatable(by_name, { __index = by_label })
+end
+
 -- 查詢單一物品(只用 label)在 AE2 網路內的總數量。失敗回傳 nil, 錯誤訊息 (呼叫端不可當成 0 處理)
 function sdlogic.count_item(entry, ae)
     ae = ae or main().ae
     if not ae then return nil, "找不到 ME 介面" end
+    if entry.fluid then
+        local sums, e = sdlogic.fluid_totals(ae)
+        if not sums then return nil, e end
+        return sums[entry.fluid] or sums[entry.label] or 0
+    end
     local ok, items = pcall(ae.getItemsInNetwork, { label = entry.label })
     if not ok or type(items) ~= "table" then return nil, "AE2 查詢失敗" end
     local total = 0
@@ -427,9 +475,23 @@ end
 -- 回傳 counts(label → 數量；查詢失敗的 label 為 nil), 實際使用的模式
 function sdlogic.query_counts(items, ctx)
     local mode = ctx.query_mode or "auto"
-    if mode == "auto" then mode = (#items > (ctx.query_full_threshold or 8)) and "full" or "filter" end
     local counts = {}
-    if mode == "full" then
+    -- 流體一律一次查完 (getFluidsInNetwork 本來就是整個網路)，其餘物品照 query_mode
+    local fluid_sums, fluid_err
+    local plain = {}
+    for _, entry in ipairs(items) do
+        if entry.fluid then
+            if fluid_sums == nil and fluid_err == nil then fluid_sums, fluid_err = sdlogic.fluid_totals(ctx.ae) end
+            if fluid_sums then counts[entry.label] = fluid_sums[entry.fluid] or fluid_sums[entry.label] or 0 end
+        else
+            plain[#plain + 1] = entry
+        end
+    end
+    items = plain
+    if mode == "auto" then mode = (#items > (ctx.query_full_threshold or 8)) and "full" or "filter" end
+    if #items == 0 then
+        -- 只有流體：上面已經查完
+    elseif mode == "full" then
         if ctx.ae then
             local ok, all = pcall(ctx.ae.getItemsInNetwork)
             if ok and type(all) == "table" then

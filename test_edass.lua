@@ -1487,7 +1487,12 @@ local function load_real_menu(with_database, extra)
     package.loaded.touch_menu = nil
     avail = { modem = true, database = with_database or false }
     listings = { ["6429-gpu"] = "gpu", ["a875-scr"] = "screen" }
-    for addr, spec in pairs(extra or {}) do listings[addr] = spec.type end
+    local me_types = { fluid_interface = true, me_interface = true, me_controller = true }
+    local me_set = {}
+    for addr, spec in pairs(extra or {}) do
+        listings[addr] = spec.type
+        if me_types[spec.type] then avail[spec.type] = true; rawset(component, spec.type, spec.proxy); me_set[spec.type] = true end
+    end
     local gpu = make_gpu()
     local order = {}
     gpu.bind = function() order[#order + 1] = "bind" end
@@ -1507,6 +1512,7 @@ local function load_real_menu(with_database, extra)
     local function cleanup()
         component.proxy = saved_proxy
         rawset(component, "gpu", nil); rawset(component, "database", nil)
+        for t in pairs(me_set) do rawset(component, t, nil) end
         avail = { modem = true }; listings = {}
     end
     return ok, menu, gpu, order, cleanup
@@ -1617,7 +1623,7 @@ test("touch_menu: with a transposer + modem the miner module starts and the butt
     local chest = make_chest({ [0] = drone(4, 3) })
     local ok, menu, gpu, order, cleanup = load_real_menu(false, { ["tp00-xx"] = { type = "transposer", proxy = chest }, ["mo00-xx"] = { type = "modem", proxy = {} } })
     truthy(ok, "require failed: " .. tostring(menu))
-    eq(menu.miner_transposer, chest); eq(menu.miner_port, 300); eq(menu.miner_chest_side, 2)
+    eq(menu.miner_transposer, chest); eq(menu.miner_port, 300); eq(menu.miner_chest_side, 1)
     menu.config_file_path = TMP_DIR .. "/menu_cfg5.json"
     os.remove(menu.config_file_path)
     menu.start()
@@ -1644,6 +1650,77 @@ test("touch_menu: without a transposer the miner button explains why instead of 
     truthy(menu.scan_message.text:find("未啟用", 1, true))
     menu.stop()
     cleanup()
+end)
+
+
+-- ===================== fluids (GTNH 2.9: fluid_interface) =====================
+local function fluid_stack(fname, flabel, amount)
+    return { name = "NotEnoughItems:neiFluidDisplay", damage = 0, label = "drop of " .. flabel,
+             fluid = { amount = amount or 144, id = 3, label = flabel, name = fname } }
+end
+
+test("scan: a database fluid becomes a monitor entry keyed by the fluid label, with the registry name", function()
+    Main.db = db_with({ [1] = fluid_stack("ic2uumatter", "UU-Matter"), [2] = stack("a:x", 0, "Iron") })
+    cfg_items({})
+    local n, added = sdlogic.scan_database()
+    eq(n, 2); eq(added[1], "UU-Matter")
+    local items, errs = sdlogic.load_hybrid_config()
+    eq(#errs, 0); eq(#items, 2)
+    eq(items[1].label, "UU-Matter"); eq(items[1].fluid, "ic2uumatter"); eq(items[1].mode_tag, "monitor")
+    eq(items[2].fluid, nil, "plain items have no fluid field")
+    eq((sdlogic.scan_database()), 0, "second scan adds nothing")
+end)
+
+test("fluid entry: restock/clone/miner are rejected, bad fluid field is an error", function()
+    cfg_items({ restock("UU", 10, 1, { fluid = "ic2uumatter" }), entry("Bad", "monitor", { fluid = 5 }),
+                entry("OK", "monitor", { fluid = "water" }) })
+    local items, errs = sdlogic.load_hybrid_config()
+    eq(#items, 1); eq(items[1].label, "OK"); eq(#errs, 2)
+end)
+
+test("count_item: fluids are summed in mB from getFluidsInNetwork by registry name", function()
+    local calls = 0
+    local ae = { getFluidsInNetwork = function() calls = calls + 1; return {
+        { name = "ic2uumatter", label = "UU-Matter", amount = 1000 },
+        { name = "ic2uumatter", label = "UU-Matter", amount = 234 },
+        { name = "water", label = "Water", amount = 5 },
+    } end, getItemsInNetwork = function() error("items must not be queried for a fluid") end }
+    eq(sdlogic.count_item({ label = "UU-Matter", fluid = "ic2uumatter" }, ae), 1234)
+    eq(sdlogic.count_item({ label = "Nothing", fluid = "nope" }, ae), 0)
+    eq(sdlogic.count_item({ label = "Water", fluid = "wrongname" }, ae), 5, "falls back to the label")
+    local n, err = sdlogic.count_item({ label = "X", fluid = "x" }, { getItemsInNetwork = function() return {} end })
+    eq(n, nil); truthy(err, "an ME component without fluid support gives an error, not 0")
+    local n2 = sdlogic.count_item({ label = "X", fluid = "x" }, { getFluidsInNetwork = function() error("boom") end })
+    eq(n2, nil)
+end)
+
+test("query_counts: fluids are fetched with a single call whatever the query mode", function()
+    local fcalls, icalls = 0, {}
+    local ae = {
+        getFluidsInNetwork = function() fcalls = fcalls + 1; return { { name = "f1", label = "F1", amount = 7 }, { name = "f2", label = "F2", amount = 9 } } end,
+        getItemsInNetwork = function(filter) icalls[#icalls + 1] = filter and filter.label or "ALL"; return { { label = "Iron", size = 3 } } end,
+    }
+    local items = { entry("F1", "monitor", { fluid = "f1" }), entry("F2", "monitor", { fluid = "f2" }), entry("Iron", "monitor") }
+    for _, mode in ipairs({ "filter", "full", "auto" }) do
+        fcalls, icalls = 0, {}
+        local counts = sdlogic.query_counts(items, { ae = ae, query_mode = mode })
+        eq(counts.F1, 7, mode); eq(counts.F2, 9, mode); eq(counts.Iron, 3, mode); eq(fcalls, 1, mode)
+        eq(#icalls, 1, mode)
+    end
+    local only = sdlogic.query_counts({ items[1] }, { ae = ae, query_mode = "full" })
+    eq(only.F1, 7)
+    local down = sdlogic.query_counts({ items[1] }, { ae = { getFluidsInNetwork = function() error("x") end }, query_mode = "full" })
+    eq(down.F1, nil, "failed fluid query stays nil (shown as ?)")
+end)
+
+test("touch_menu picks fluid_interface before me_interface and me_controller", function()
+    local fi, mi = { tag = "fi" }, { tag = "mi" }
+    local ok, menu, _, _, cleanup = load_real_menu(false, { ["fi00-xx"] = { type = "fluid_interface", proxy = fi }, ["mi00-xx"] = { type = "me_interface", proxy = mi } })
+    truthy(ok); eq(menu.ae, fi)
+    cleanup()
+    local ok2, menu2, _, _, cleanup2 = load_real_menu(false, { ["mi00-xx"] = { type = "me_interface", proxy = mi } })
+    truthy(ok2); eq(menu2.ae, mi, "falls back to me_interface on older packs")
+    cleanup2()
 end)
 
 print(string.format("\n%d passed, %d failed", passed, failed))

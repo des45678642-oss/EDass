@@ -24,7 +24,7 @@ OpenComputers touch panel (`touch_menu.lua`) with an AE2 stock monitor, plus the
   ]
 }
 ```
-- AE2 is searched **by `label` only** (`me_interface.getItemsInNetwork`, falls back to `me_controller`), so `label` is the item's identity: a second entry with the same label is flagged as an error. `name` and `damage` are stored for when an item has to be written into a database; they do not take part in any search.
+- AE2 is searched **by `label` only** (`getItemsInNetwork` on `fluid_interface` first, then `me_interface`, then `me_controller` — GTNH 2.9 broke the item query on the old components), so `label` is the item's identity: a second entry with the same label is flagged as an error. `name` and `damage` are stored for when an item has to be written into a database; they do not take part in any search.
 - `mode_tag`
   - `restock` – order `target_once` crafts when stock is below `target_quantity`. `cooldown` seconds between orders (omit → `default_cooldown`).
   - `clone` – global-lock replication machine at `circuit` (1-24), `priority` 1-9 (lower wins, default 9).
@@ -43,7 +43,7 @@ OpenComputers touch panel (`touch_menu.lua`) with an AE2 stock monitor, plus the
 Log codes written to `ae_log.txt` (`label=tag1=tag2=tag3`): 0 ok, 1 ordered, 2 cooldown, 3 AE refused, 4 no pattern, 5 cloning, 6 queued, **7 AE2 query failed (never treated as 0 stock)**.
 
 ## Miner mode (`mode_tag: "miner"`)
-`touch_menu` takes over the job of `space_main.lua`: for every `miner` item whose AE2 stock is below `target_quantity` it assigns miner computers (`space_miner.lua`, port 300) and hands each one a mining drone from the shared ender chest. The computer running `touch_menu` therefore needs a **modem** and a **transposer next to the shared ender chest** (`miner_chest_side`, default 2).
+`touch_menu` takes over the job of `space_main.lua`: for every `miner` item whose AE2 stock is below `target_quantity` it assigns miner computers (`space_miner.lua`, port 300) and hands each one a mining drone from the shared ender chest. The computer running `touch_menu` therefore needs a **modem** and a **transposer next to the shared ender chest** (`miner_chest_side`, default 1 — same as `space_main.lua`).
 
 ```json
 {"name": "mod:ore", "damage": 0, "label": "Some Ore", "mode_tag": "miner",
@@ -66,6 +66,15 @@ Differences from `space_main.lua` (all intentional):
 9. The modem strength is 16 only while sending to miners and is restored afterwards (the clone machine broadcast needs 400 on the same card).
 
 Not changed: miners are never removed from the roster when they go offline (there is no heartbeat in the protocol). The AE2 restock/clone logic still only runs while page 2 is shown; the miner scheduling runs on every page.
+
+## Fluids (GTNH 2.9)
+A fluid in the database is a `NotEnoughItems:neiFluidDisplay` stack whose `fluid` field holds `{amount, id, label, name}`. Scanning stores it as a normal `monitor` entry, keyed by the **fluid's label**, plus the registry name:
+
+```json
+{"name": "NotEnoughItems:neiFluidDisplay", "damage": 0, "label": "UU-Matter", "fluid": "ic2uumatter", "mode_tag": "monitor", "target_quantity": 0}
+```
+
+Fluid entries are counted in mB with one `getFluidsInNetwork()` call per refresh (summed by registry name, falling back to the label), whatever `query_mode` is. They support `monitor` only; `restock`/`clone`/`miner` on a fluid is reported as a config error. Remote queries (`AE_QUERY`) work for fluids too, with the label as the key. Needs a `fluid_interface` component; with only `me_interface` the entry shows `?` and the page-2 error line explains why.
 
 ## Page 1: batteries
 Shows every `gt_machine` on the network whose `getName()` contains `multimachine.supercapacitor`: address, stored EU, total capacity, percentage and a bar, plus the combined total. The numbers come from `getSensorInformation()` and are parsed tolerantly: `EU Stored` and `Total Capacity` as separate lines or as `stored / total` on one line, thousands separators, colour codes and scientific notation (`1.5E10`); if only `Used Capacity: xx%` is available just the percentage is shown. Colours follow `high_energy_threshold` / `low_energy_threshold` (green / yellow / red).
