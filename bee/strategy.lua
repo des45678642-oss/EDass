@@ -14,9 +14,7 @@ local beeData = require("beeData")
 
 local beeUtil = require("beeUtil")
 
---比对用的基因表：不含 flowerProvider（采蜜对象）与 effect（特殊效果）。
---这两项在 database 虚构蜜蜂与实际蜜蜂之间对不起来，比对时忽略；输出蜜蜂前由 washEffect 把 effect 洗成 forestry.effectNone。
-local chromosomeList = beeUtil.compareChromosomes()
+local chromosomeList = beeUtil.ALL_CHROMOSOMES
 
 function M.mutate(princessSlot, droneSlot, targetSpecies, mutation)--单步突变
     --参与配对的杂交雄蜂被归为三类：亲代1纯合基因雄蜂（11型）、亲代2纯合基因雄蜂（22型）、双亲杂合基因雄蜂（12型）
@@ -242,7 +240,7 @@ function M.mutate(princessSlot, droneSlot, targetSpecies, mutation)--单步突�
     return targetBeeSlots, princessSlot
 end
 
-function M.purify(princessSlot, droneSlot, targetGenes, assistantDroneSlot, labelSuffix, chromosomes)--纯化
+function M.purify(princessSlot, droneSlot, targetGenes, assistantDroneSlot, labelSuffix)--纯化
     --目标基因分为以下四类：生育基因、突变产生的值得保留的新基因（Ⅱ类基因）、样板蜂已有的基因（Ⅲ类基因）、突变产生与样板已有重合的基因（不纳入计算因素）
     --提纯过程存在基因丢失的概率，若导致Ⅱ类基因丢失，则应当返回nil，待上级函数调用冲洗函数将公主蜂洗成母本基因，并调用突变函数进行新一轮的突变获取新的Ⅱ类基因后，再调用此函数继续提纯。
     --由于返回时不丢弃已有雄蜂，且已有雄蜂均打上了该品种基因提纯标签，故可在下一轮调用中继承已有的提纯进度。
@@ -254,12 +252,27 @@ function M.purify(princessSlot, droneSlot, targetGenes, assistantDroneSlot, labe
     end
     --1.校验输入，对基因进行分类
     local newGenes, templateGenes = {}, {}
-    local isWash = chromosomes ~= nil--仅针对指定基因（洗特殊效果）的纯化，不再递归洗涤
-    local list = chromosomes or chromosomeList
+    --除了品种 (species) 以配种目标为准，其余基因 (含采蜜对象、特殊效果) 一律对着样板雄蜂强制提纯；
+    --速度保留 getTargetGenes 的规则 (品种自带速度与样板速度取高者)，特殊效果一律为 forestry.effectNone。
+    --这样拿到品种正确、但采蜜对象或效果与样板不一致的蜜蜂时，会被提纯成样板基因，而不是因为找不到目标基因而报错。
+    if targetGenes.followAssistant then
+        local followed = {}
+        for chromosome, gene in pairs(targetGenes) do
+            followed[chromosome] = gene
+        end
+        for _, chromosome in pairs(chromosomeList) do
+            if chromosome ~= "species" and chromosome ~= "speed" then
+                followed[chromosome] = bot.inventory[assistantDroneSlot][chromosome][1]
+            end
+        end
+        followed.effect = beeUtil.EFFECT_NONE
+        followed.followAssistant = nil
+        targetGenes = followed
+    end
     if bot.inventory[assistantDroneSlot].fertility[1] ~= 4 or bot.inventory[assistantDroneSlot].fertility[2] ~= 4 then
         error("错误的调用strategy("..tostring(princessSlot)..","..tostring(droneSlot)..","..tostring(assistantDroneSlot)..","..tostring(targetGenes.species)..")，样板雄蜂的生育基因必须为纯合4x")
     end
-    for _, chromosome in pairs(list) do
+    for _, chromosome in pairs(chromosomeList) do
         local gene = bot.inventory[princessSlot][chromosome]
         --校验目标基因是否存在
         if gene[1] ~= targetGenes[chromosome] and gene[2] ~= targetGenes[chromosome] and bot.inventory[droneSlot][chromosome][1] ~= targetGenes[chromosome] and bot.inventory[droneSlot][chromosome][2] ~= targetGenes[chromosome] 
@@ -677,26 +690,6 @@ function M.purify(princessSlot, droneSlot, targetGenes, assistantDroneSlot, labe
         end
         nextGeneration(droneSlot)
     end
-    --3.5 输出前确保特殊效果为 forestry.effectNone：比对时忽略了 effect，这里单独把它洗掉
-    if not isWash and targetGenes.effect == beeUtil.EFFECT_NONE
-        and beeUtil.needsEffectWash(bot.inventory[princessSlot], bot.inventory[droneSlot]) then
-        local function hasNone(bee)
-            return bee.effect[1] == beeUtil.EFFECT_NONE or bee.effect[2] == beeUtil.EFFECT_NONE
-        end
-        if not (hasNone(bot.inventory[princessSlot]) or hasNone(bot.inventory[droneSlot]) or hasNone(bot.inventory[assistantDroneSlot])) then
-            error("无法洗去特殊效果：公主蜂、雄蜂和样板雄蜂都不携带 forestry.effectNone 基因")
-        end
-        print("正在洗去特殊效果")
-        local washedDrone, washedPrincess = M.purify(princessSlot, droneSlot, {species = targetGenes.species, effect = beeUtil.EFFECT_NONE}, assistantDroneSlot, (labelSuffix or "")..":wash", {"effect"})
-        if not washedDrone then
-            bot.inventoryLabel = previousLabel
-            return nil, washedPrincess
-        end
-        droneSlot, princessSlot = washedDrone, washedPrincess
-        bot.inventoryLabel = "purify"..targetGenes.species..(labelSuffix or "")
-        bot.inventory[princessSlot].inventoryLabel = bot.inventoryLabel
-        bot.inventory[droneSlot].inventoryLabel = bot.inventoryLabel
-    end
     --4.丢弃期间产生的所有杂蜂，将雄蜂数量繁殖到16以上后返回
     for _,slot in pairs(bot.getItemsWithLabel(bot.inventoryLabel)) do
         if slot ~= droneSlot and bot.inventory[slot].type == "beeDrone" then
@@ -725,7 +718,7 @@ function M.breedDrones(princessSlot, droneSlot, targetAmount)--繁殖雄蜂
     if bot.inventory[princessSlot].type ~= "beePrincess" or bot.inventory[droneSlot].type ~= "beeDrone" then
         error(string.format("错误的调用strategy.breedDrones(%d, %d, %d)",princessSlot, droneSlot, targetAmount))
     end
-    for _, chromosome in pairs(beeUtil.ALL_CHROMOSOMES) do--繁殖要求亲本全基因纯合，包含被比对忽略的采蜜对象与特殊效果，否则后代会分裂成多种基因型
+    for _, chromosome in pairs(chromosomeList) do
         local p1, p2 = bot.inventory[princessSlot][chromosome][1], bot.inventory[princessSlot][chromosome][2]
         local d1, d2 = bot.inventory[droneSlot][chromosome][1], bot.inventory[droneSlot][chromosome][2]
         if p1 ~= p2 or d1 ~= d2 or p1 ~= d1 then
@@ -855,7 +848,7 @@ function M.newSpecies(species, mutation)--突变新品种并优化基因
     local mutatedBeeList, droneSlot
     local function isTemplatedGenes(tag)
         local genes = require("analyzeGenes")({name="Forestry:beeDroneGE",individual={},tag=tag})
-        for chromosome, gene in pairs({flowering=1,fertility=4,territory=1,temperatureTolerance="BOTH_5",humidityTolerance="BOTH_5",nocturnal=true,tolerantFlyer=true,caveDwelling=true}) do
+        for chromosome, gene in pairs({flowering=1,flowerProvider="extrabees.flower.rock",fertility=4,territory=1,temperatureTolerance="BOTH_5",humidityTolerance="BOTH_5",nocturnal=true,tolerantFlyer=true,caveDwelling=true}) do
             if genes[chromosome][1] ~= gene or genes[chromosome][2] ~= gene then
                 return false
             end

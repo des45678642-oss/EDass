@@ -33,12 +33,15 @@
 
 「樣板」指 `strategy.initialize` 內 `templateGenes[1..3]`；比對時不看採蜜對象與特殊效果。
 
-## 比對時忽略採蜜對象與特殊效果
-database 虛構出來的蜜蜂只能指定品種，採蜜對象（`flowerProvider`）與特殊效果（`effect`）是品種預設值，和實際蜜蜂對不起來。現在所有比對（`strategy`、`beeData` 的基因表，`getDroneTag` 評分，`isTemplatedGenes`）都**不含這兩項**（`beeUtil.IGNORED`）。
+## 除了品種，其餘基因都對著樣板雄蜂提純
+只有 `species` 以配種目標為準；其他基因（含採蜜對象 `flowerProvider`、特殊效果 `effect`）在 `strategy.purify` 裡一律改成樣板雄蜂的基因來強制提純：
 
-輸出前一定會洗成無效果：`purify` 在目標 `effect` 為 `forestry.effectNone` 時，若公主蜂或雄蜂有任一個效果基因不是 `forestry.effectNone`，會再針對 `effect` 單獨提純一次（`純化` 的第 6 個參數 `chromosomes`）。公主蜂、雄蜂、樣板雄蜂都沒有 `effectNone` 基因時會明確報錯。
-
-注意：`breedDrones` 仍然要求**全部**基因純合（含採蜜對象與效果），否則後代會分裂成多種基因型；採蜜對象目前靠樣板蜂遺傳，沒有被強制提純。
+- `beeData.getTargetGenes` 回傳的目標帶有 `followAssistant = true`，`purify` 看到後把除 `species`、`speed` 以外的目標基因換成樣板雄蜂的基因，`effect` 一律是 `forestry.effectNone`。
+- 這樣拿到品種對、但採蜜對象或特殊效果與查詢（database 虛構蜜蜂）不一致的蜜蜂時，不會因為「找不到目標基因」報錯，而是被提純成樣板基因。
+- `speed` 保留原本的規則（品種自帶速度與樣板速度取高者），沒有跟著樣板；如果要連速度也跟樣板，改 `strategy.lua` 裡 `chromosome ~= "speed"` 那一行。
+- 初始化階段（`beeData.initialized == false`）的目標是明確寫死的樣板基因，沒有 `followAssistant`，行為不變。
+- 以 database 虛構蜜蜂做查詢排序的 `beeData.getDroneTag` 仍不看採蜜對象（那是找蜜蜂的查詢，不是提純）。
+- 樣板雄蜂本身需要帶 `forestry.effectNone`，否則 `purify` 會報目標基因不存在。
 
 ## 沒有適合的蜂箱
 不再只報錯，會顯示公主蜂需要的環境、突變的額外要求，以及目前配置的蜂箱，例如：
@@ -57,4 +60,4 @@ database 虛構出來的蜜蜂只能指定品種，採蜜對象（`flowerProvide
 ```
 python run_bee_tests.py bee
 ```
-用 Python 的 `lupa`（Lua 5.3）加上模擬的 OC 元件。涵蓋 base64/JSON 往返、`data.json` 讀寫與損毀檔案處理、舊 `data.txt` 轉換、基因比對、無蜂箱訊息、洗特殊效果（模擬繁殖）。**沒有**在遊戲內跑過：`purify` 整套演算法、ME 與機器人操作都需要實機驗證。
+用 Python 的 `lupa`（Lua 5.3）加上模擬的 OC 元件。涵蓋 base64/JSON 往返、`data.json` 讀寫與損毀檔案處理、舊 `data.txt` 轉換、基因比對、無蜂箱訊息、對著樣板雄蜂提純（簡化的繁殖模擬）。**沒有**在遊戲內跑過：`purify` 整套演算法、ME 與機器人操作都需要實機驗證。

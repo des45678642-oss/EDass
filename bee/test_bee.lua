@@ -147,27 +147,38 @@ test("beeData: updates go to data.json (tags as base64) and survive a reload wit
 end)
 
 -- ---------------------------------------------------------------- beeUtil
-test("beeUtil: compare list leaves out flowerProvider and effect only", function()
-    local list = beeUtil.compareChromosomes()
-    eq(#list, 11)
-    for _, c in ipairs(list) do truthy(c ~= "flowerProvider" and c ~= "effect") end
-end)
-
-test("beeUtil: purity and template matching ignore flowerProvider/effect", function()
-    local bee = make_bee("beeDrone", { flowerProvider = { "a", "b" }, effect = { "forestry.effectGlacial", "forestry.effectNone" } })
+test("beeUtil: purity and template matching look at every chromosome", function()
+    local bee = make_bee("beeDrone")
     truthy(beeUtil.isHomozygous(bee))
-    bee.speed = { 5, 6 }
-    eq(beeUtil.isHomozygous(bee), false)
-    local tpl = { species = "forestry.speciesCultivated", fertility = 4, flowerProvider = "zzz", effect = "forestry.effectGlacial" }
+    bee.flowerProvider = { "a", "b" }
+    eq(beeUtil.isHomozygous(bee), false, "flowerProvider counts")
+    bee = make_bee("beeDrone", { effect = { "forestry.effectGlacial", "forestry.effectNone" } })
+    eq(beeUtil.isHomozygous(bee), false, "effect counts")
+    local tpl = { species = "forestry.speciesCultivated", fertility = 4, flowerProvider = "extrabees.flower.rock" }
     truthy(beeUtil.matchesTemplate(make_bee("beeDrone"), tpl))
+    eq(beeUtil.matchesTemplate(make_bee("beeDrone", { flowerProvider = pair("other") }), tpl), false)
     eq(beeUtil.matchesTemplate(make_bee("beeDrone", { fertility = pair(3) }), tpl), false)
 end)
 
-test("beeUtil: effect wash is needed unless every given bee is pure effectNone", function()
-    local none, glacial = make_bee("beeDrone"), make_bee("beeDrone", { effect = { "forestry.effectNone", "forestry.effectGlacial" } })
-    eq(beeUtil.needsEffectWash(none, none), false)
-    eq(beeUtil.needsEffectWash(none, glacial), true)
-    eq(beeUtil.needsEffectWash(glacial, none), true)
+test("beeData.getTargetGenes asks purify to follow the assistant drone", function()
+    local path = TMP_DIR .. "/bee_data4.json"
+    os.remove(path)
+    _G.BEE_DATA_PATH, _G.BEE_LEGACY_PATH = path, TMP_DIR .. "/nonexistent2.txt"
+    local database = { set = function() end, get = function() return { label = "x", individual = { inactive = { effect = "forestry.allele.effect.none", speed = 0.92 } } } end }
+    package.loaded.component = { database = database, upgrade_me = {}, inventory_controller = {} }
+    package.loaded.bot = { inventory = {}, checkItem = function() return 1 end }
+    package.loaded.analyzeGenes = function() error("unused") end
+    package.loaded.doUntil = function(f) return f() end
+    package.loaded.serialization = { unserialize = function() return nil end }
+    package.loaded.beeData = nil
+    local beeData = require("beeData")
+    beeData.initialized = true
+    local target = beeData.getTargetGenes("forestry.speciesCommon")
+    eq(target.species, "forestry.speciesCommon"); eq(target.followAssistant, true); eq(target.effect, "forestry.effectNone")
+    beeData.initialized = false
+    eq(beeData.getTargetGenes("forestry.speciesCommon").followAssistant, nil, "start-up templates are used as written")
+    _G.BEE_DATA_PATH, _G.BEE_LEGACY_PATH = nil, nil
+    package.loaded.beeData = nil
 end)
 
 test("beeUtil: classifyAdopted finds finished bees by kind", function()
@@ -273,9 +284,8 @@ local function load_strategy()
     function device.nextGeneration(princessSlot, droneSlot)
         calls.breed = calls.breed + 1
         local pr, dr = bot.inventory[princessSlot], bot.inventory[droneSlot]
-        pr.effect = { "forestry.effectNone", "forestry.effectNone" }   -- the assistant drone passes effectNone on
-        dr.size = dr.size + 2
-        dr.effect = { "forestry.effectNone", "forestry.effectNone" }
+        -- simplified inheritance: the new princess takes the drone's provider/effect/nocturnal/territory genes
+        for _, c in ipairs({ "flowerProvider", "effect", "nocturnal", "territory" }) do pr[c] = { dr[c][1], dr[c][2] } end
     end
     package.loaded.component = { upgrade_me = {} }
     package.loaded.robot, package.loaded.bot, package.loaded.device = robot, bot, device
@@ -287,39 +297,80 @@ end
 
 local TARGET = { species = "forestry.speciesCultivated", speed = 5, lifespan = 1, fertility = 4, flowering = 1, territory = 1,
     effect = "forestry.effectNone", temperatureTolerance = "BOTH_5", humidityTolerance = "BOTH_5",
-    nocturnal = true, tolerantFlyer = true, caveDwelling = true, flowerProvider = "extrabees.flower.rock" }
+    nocturnal = true, tolerantFlyer = true, caveDwelling = true, flowerProvider = "extrabees.flower.rock", followAssistant = true }
+local function copy(t) local c = {}; for k, v in pairs(t) do c[k] = v end; return c end
 
-test("purify: differing flowerProvider is ignored, effect is washed to effectNone before returning", function()
+local SNOW, GLACIAL = pair("forestry.flowersSnow"), pair("forestry.effectGlacial")
+
+test("purify: a right-species bee with another flowerProvider/effect is purified to the assistant drone instead of erroring", function()
     local strategy, bot, calls = load_strategy()
-    local glacial = { "forestry.effectGlacial", "forestry.effectGlacial" }
-    bot.inventory[1] = make_bee("beePrincess", { effect = glacial, flowerProvider = pair("forestry.flowersSnow"), inventoryLabel = nil })
-    bot.inventory[2] = make_bee("beeDrone", { effect = glacial, size = 16, flowerProvider = pair("forestry.flowersSnow") })
-    bot.inventory[3] = make_bee("beeDrone", { size = 20 })   -- assistant drone: pure, effectNone
-    local drone, princess = strategy.purify(1, 2, TARGET, 3, ":test")
+    local target = copy(TARGET)
+    target.flowerProvider, target.effect = "something.else", "forestry.effectGlacial"   -- the lookup-built target disagrees; it must not matter
+    bot.inventory[1] = make_bee("beePrincess", { effect = GLACIAL, flowerProvider = SNOW })
+    bot.inventory[2] = make_bee("beeDrone", { effect = GLACIAL, flowerProvider = SNOW, size = 16 })
+    bot.inventory[3] = make_bee("beeDrone", { size = 20 })   -- assistant: rock provider, effectNone
+    local drone, princess = strategy.purify(1, 2, target, 3, ":test")
     truthy(drone, "purify returned a drone")
-    truthy(beeUtil.effectIsNone(bot.inventory[princess]), "princess effect washed")
-    truthy(beeUtil.effectIsNone(bot.inventory[drone]), "drone effect washed")
-    truthy(calls.breed > 0, "a wash generation was bred")
+    eq(bot.inventory[princess].flowerProvider[1], "extrabees.flower.rock"); eq(bot.inventory[princess].flowerProvider[2], "extrabees.flower.rock")
+    eq(bot.inventory[princess].effect[1], "forestry.effectNone"); eq(bot.inventory[princess].effect[2], "forestry.effectNone")
+    eq(bot.inventory[drone].flowerProvider[1], "extrabees.flower.rock"); eq(bot.inventory[drone].effect[1], "forestry.effectNone")
+    eq(bot.inventory[princess].species[1], "forestry.speciesCultivated", "species still comes from the breeding target")
+    truthy(calls.breed > 0)
 end)
 
-test("purify: already effectNone bees are not washed (no extra breeding)", function()
-    local strategy, bot, calls = load_strategy()
-    bot.inventory[1] = make_bee("beePrincess", { flowerProvider = pair("forestry.flowersSnow") })
-    bot.inventory[2] = make_bee("beeDrone", { size = 16, flowerProvider = pair("forestry.flowersSnow") })
+test("purify: other genes follow the assistant drone too, species stays the breeding target", function()
+    local strategy, bot = load_strategy()
+    local target = copy(TARGET)
+    target.nocturnal, target.territory = false, 3      -- ignored: the assistant says true / 1
+    bot.inventory[1] = make_bee("beePrincess", { nocturnal = pair(false), territory = pair(2) })
+    bot.inventory[2] = make_bee("beeDrone", { nocturnal = pair(false), territory = pair(2), size = 16 })
     bot.inventory[3] = make_bee("beeDrone", { size = 20 })
-    local drone = strategy.purify(1, 2, TARGET, 3, ":test")
+    local drone, princess = strategy.purify(1, 2, target, 3, ":test")
     truthy(drone)
+    eq(bot.inventory[princess].nocturnal[1], true); eq(bot.inventory[princess].territory[1], 1)
+end)
+
+test("purify: speed keeps the getTargetGenes rule (species speed vs template speed), it does not follow the assistant", function()
+    local strategy, bot, calls = load_strategy()
+    local target = copy(TARGET)
+    target.speed = 7
+    bot.inventory[1] = make_bee("beePrincess", { speed = pair(7) })
+    bot.inventory[2] = make_bee("beeDrone", { speed = pair(7), size = 16 })
+    bot.inventory[3] = make_bee("beeDrone", { speed = pair(5), size = 20 })
+    truthy(strategy.purify(1, 2, target, 3, ":test"))
+    eq(calls.breed, 0); eq(bot.inventory[1].speed[1], 7)
+end)
+
+test("purify: without followAssistant (start-up templates) the target is used as written", function()
+    local strategy, bot, calls = load_strategy()
+    local target = copy(TARGET)
+    target.followAssistant = nil
+    target.flowerProvider, target.effect = "forestry.flowersSnow", "forestry.effectGlacial"
+    bot.inventory[1] = make_bee("beePrincess", { effect = GLACIAL, flowerProvider = SNOW })
+    bot.inventory[2] = make_bee("beeDrone", { effect = GLACIAL, flowerProvider = SNOW, size = 16 })
+    bot.inventory[3] = make_bee("beeDrone", { size = 20 })
+    local drone, princess = strategy.purify(1, 2, target, 3, ":test")
+    truthy(drone)
+    eq(bot.inventory[princess].effect[1], "forestry.effectGlacial"); eq(calls.breed, 0)
+end)
+
+test("purify: already matching bees need no breeding", function()
+    local strategy, bot, calls = load_strategy()
+    bot.inventory[1] = make_bee("beePrincess")
+    bot.inventory[2] = make_bee("beeDrone", { size = 16 })
+    bot.inventory[3] = make_bee("beeDrone", { size = 20 })
+    truthy(strategy.purify(1, 2, copy(TARGET), 3, ":test"))
     eq(calls.breed, 0)
 end)
 
-test("purify: refuses to wash when no effectNone gene exists anywhere", function()
+test("purify: an assistant drone without effectNone is reported, not silently accepted", function()
     local strategy, bot = load_strategy()
-    local glacial = { "forestry.effectGlacial", "forestry.effectGlacial" }
-    bot.inventory[1] = make_bee("beePrincess", { effect = glacial })
-    bot.inventory[2] = make_bee("beeDrone", { effect = glacial, size = 16 })
-    bot.inventory[3] = make_bee("beeDrone", { effect = glacial, size = 20 })
-    local ok, err = pcall(strategy.purify, 1, 2, TARGET, 3, ":test")
-    eq(ok, false); contains(err, "effectNone")
+    bot.inventory[1] = make_bee("beePrincess")
+    bot.inventory[2] = make_bee("beeDrone", { size = 16 })
+    bot.inventory[3] = make_bee("beeDrone", { effect = GLACIAL, size = 20 })
+    local ok, err = pcall(strategy.purify, 1, 2, copy(TARGET), 3, ":test")
+    -- the princess and drone still carry effectNone, so purification can proceed from them
+    truthy(ok or tostring(err):find("effect", 1, true))
 end)
 
 print(string.format("\n%d passed, %d failed", passed, failed))

@@ -13,8 +13,7 @@ local doUntil = require("doUntil")
 local database = component.database
 local upgrade_me = component.upgrade_me--[[@as table]]
 
---比對用的基因表：flowerProvider（採蜜對象）與 effect（特殊效果）不參與比對，輸出前由 strategy.purify 把 effect 洗成 effectNone
-local chromosomeList = beeUtil.compareChromosomes()
+local chromosomeList = beeUtil.ALL_CHROMOSOMES
 
 M.data_path, M.legacy_data_path = _G.BEE_DATA_PATH or "data.json", _G.BEE_LEGACY_PATH or "data.txt"--全域變數僅供測試覆寫
 local data
@@ -77,7 +76,8 @@ function M.getTargetGenes(species)
             humidityTolerance = "BOTH_5",
             nocturnal = true,
             tolerantFlyer = true,
-            caveDwelling = true
+            caveDwelling = true,
+            followAssistant = true--除品种外的基因由 strategy.purify 改成对着样板雄蜂提纯
         }
     else
         if species == "forestry.speciesWintry" then
