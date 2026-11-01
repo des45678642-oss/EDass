@@ -3,6 +3,8 @@ local M = {}
 
 local component = require("component")
 local serialization = require("serialization")
+local store = require("beeStore")
+local beeUtil = require("beeUtil")
 
 local bot = require("bot")
 local analyzeGenes = require("analyzeGenes")
@@ -11,27 +13,29 @@ local doUntil = require("doUntil")
 local database = component.database
 local upgrade_me = component.upgrade_me--[[@as table]]
 
-local chromosomeList = {"species", "speed", "lifespan", "fertility", "flowering", "flowerProvider", "territory", "effect", "temperatureTolerance", "humidityTolerance", "nocturnal", "tolerantFlyer", "caveDwelling"}
+--比對用的基因表：flowerProvider（採蜜對象）與 effect（特殊效果）不參與比對，輸出前由 strategy.purify 把 effect 洗成 effectNone
+local chromosomeList = beeUtil.compareChromosomes()
 
+M.data_path, M.legacy_data_path = _G.BEE_DATA_PATH or "data.json", _G.BEE_LEGACY_PATH or "data.txt"--全域變數僅供測試覆寫
 local data
 local function saveData()
     if data then
         data.initialized = M.initialized
     end
-    local file = io.open("data.txt", "w")
-    if file then
-        file:write(serialization.serialize(data) or "{}")
-        file:close()
+    local ok, err = store.save(M.data_path, data or {})
+    if not ok then
+        print("警告：" .. tostring(err))
     end
-    
 end
 local function loadData()
-    local file = io.open("data.txt", "r")
-    if file then
-        data = serialization.unserialize(file:read("*a"))
-        file:close()
+    local loaded, source = store.load(M.data_path, M.legacy_data_path, serialization.unserialize)
+    if not loaded and source then
+        --data.json 存在但壞掉：不能直接當成全新資料覆蓋，否則辅助蜜蜂紀錄會全部遺失並重新初始化
+        error(source .. "（原檔案未被修改，請修復或刪除後再執行）")
     end
+    data = loaded
     if not data then
+        M.initialized = false
         data = {
             initialized = false,
             assistantDroneTag = nil,
@@ -40,6 +44,8 @@ local function loadData()
             usingPrincessTag = nil
         }
         saveData()
+    elseif source == "legacy" then
+        saveData()--舊版 data.txt 讀得出來就轉存成 data.json
     end
     M.initialized = data.initialized
 end
@@ -163,7 +169,6 @@ function M.getDroneTag(species)
             speed = data.speedLevel,
             lifespan = 1,
             flowering = 1,
-            flowerProvider = "extrabees.flower.rock",
             fertility = 4,
             territory = 1,
             temperatureTolerance = "BOTH_5",

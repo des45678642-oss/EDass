@@ -56,7 +56,7 @@ function M.nextGeneration(princessSlot, droneSlot, mutation)
     策略为true，在突变率为0的前提下使寿命尽可能短
     策略type为table，尽可能将突变率提高到100]]
     if not apiary.checkNextGeneration(princessSlot, strategy) then
-        error("没有满足条件的蜂箱可供培育下一代")
+        error(apiary.describeMissing(princessSlot, strategy), 0)
     end
     return chooseMethod(strategy).nextGeneration(princessSlot, droneSlot, strategy)
 end

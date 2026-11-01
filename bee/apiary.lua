@@ -180,12 +180,43 @@ function M.checkNextGeneration(princessSlot, mutation)
     return selectNearestApiary(availableApiaryList)
 end
 
+--没有可用蜂箱时的说明：公主蜂需要的温度、湿度，突变的额外要求，以及现有蜂箱各自的环境
+function M.describeMissing(princessSlot, mutation)
+    local princess = bot.inventory[princessSlot]
+    local text = "没有适合的蜂箱：公主蜂需要 " .. environment.describeNeed(princess.temperature[1], princess.temperatureTolerance[1],
+        princess.humidity[1], princess.humidityTolerance[1])
+    local extra = environment.describeMutationNeed(mutation)
+    if extra then
+        text = text .. "；突变额外要求 " .. extra
+    end
+    if type(mutation) == "table" then
+        if mutation.dimension then
+            text = text .. "；该突变需要手动前往维度 " .. tostring(mutation.dimension)
+        end
+        if mutation.foundation then
+            text = text .. "；该突变需要基石 " .. tostring(mutation.foundation.label or mutation.foundation.name)
+        end
+    end
+    local locations = {}
+    for location in pairs(apiaryList) do
+        table.insert(locations, location)
+    end
+    table.sort(locations)
+    local lines = {}
+    for _, location in ipairs(locations) do
+        local a = apiaryList[location]
+        table.insert(lines, string.format("#%d 温度 %s 湿度 %s", location, environment.temperatureName(a.temperature), environment.humidityName(a.humidity)))
+    end
+    text = text .. "。当前配置的蜂箱：" .. (lines[1] and table.concat(lines, "；") or "无")
+    return text
+end
+
 --培育下一代
 function M.nextGeneration(princessSlot, droneSlot, mutation)
     --校验突变条件
     local availableApiary, requiredApiaryDamage = M.checkNextGeneration(princessSlot, mutation), mutation == true and 2 or 0
     if not availableApiary then
-        error("apiary.nextGeneration()缺少合适的蜂箱")
+        error(M.describeMissing(princessSlot, mutation), 0)
     end
     if apiaryDamage ~= requiredApiaryDamage and not bot.checkItem({name = "Forestry:apiculture", damage = requiredApiaryDamage}) then
         doUntil(function()
