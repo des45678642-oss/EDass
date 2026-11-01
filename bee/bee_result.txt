@@ -1,0 +1,21 @@
+=================== 蜜蜂基因自動分析報告 ===================
+物品名稱: Netherite Drone (Forestry:beeDroneGE)
+世代類型: 始祖種 (第 0 代)
+蜜蜂類型: 雄蜂 ♂
+------------------------------------------------------------
+  種族 (Species) : 【主】gregtech.bee.speciesNetherite  |  【副】gregtech.bee.speciesNetherite
+  壽命 (Lifespan) : 【主】早夭        |  【副】早夭      
+  工作速度 (Speed) : 【主】急速        |  【副】急速      
+  授粉速度 (Flower) : 【主】最慢        |  【副】最慢      
+  生育能力 (Fertility) : 【主】4x            |  【副】4x          
+  活動範圍 (Territory) : 【主】平均(9x6x9)  |  【副】平均(9x6x9)
+  最適溫度 (Temp) : 【主】地獄        |  【副】地獄      
+  溫度適應 (TempTol) : 【主】BOTH_5        |  【副】BOTH_5      
+  最適濕度 (Humid) : 【主】乾旱        |  【副】乾旱      
+  濕度適應 (HumidTol) : 【主】BOTH_5        |  【副】BOTH_5      
+  夜行性 (Nocturnal) : 【主】是           |  【副】是         
+  耐雨飛行 (Flyer) : 【主】是           |  【副】是         
+  穴居性 (Cave) : 【主】是           |  【副】是         
+  採蜜對象 (Provider) : 【主】extrabees.flower.rock  |  【副】extrabees.flower.rock
+  特殊效果 (Effect) : 【主】forestry.effectNone  |  【副】forestry.effectNone
+============================================================

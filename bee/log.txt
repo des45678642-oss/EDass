@@ -1,0 +1,135 @@
+============ NBT 完整結構備份 ============
+根節點名稱: 
+
+{ (COMPOUND)
+  [Genome] =>
+    { (COMPOUND)
+      [Chromosomes] =>
+        [ (LIST, 類型: 10)
+          [1] =>
+            { (COMPOUND)
+              [UID0] =>
+                gregtech.bee.speciesNetherite (類型 ID: 8)
+              [UID1] =>
+                gregtech.bee.speciesNetherite (類型 ID: 8)
+              [Slot] =>
+                0 (類型 ID: 1)
+            }
+          [2] =>
+            { (COMPOUND)
+              [UID0] =>
+                magicbees.speedBlinding (類型 ID: 8)
+              [UID1] =>
+                magicbees.speedBlinding (類型 ID: 8)
+              [Slot] =>
+                1 (類型 ID: 1)
+            }
+          [3] =>
+            { (COMPOUND)
+              [UID0] =>
+                forestry.lifespanShortest (類型 ID: 8)
+              [UID1] =>
+                forestry.lifespanShortest (類型 ID: 8)
+              [Slot] =>
+                2 (類型 ID: 1)
+            }
+          [4] =>
+            { (COMPOUND)
+              [UID0] =>
+                forestry.fertilityMaximum (類型 ID: 8)
+              [UID1] =>
+                forestry.fertilityMaximum (類型 ID: 8)
+              [Slot] =>
+                3 (類型 ID: 1)
+            }
+          [5] =>
+            { (COMPOUND)
+              [UID0] =>
+                forestry.toleranceBoth5 (類型 ID: 8)
+              [UID1] =>
+                forestry.toleranceBoth5 (類型 ID: 8)
+              [Slot] =>
+                4 (類型 ID: 1)
+            }
+          [6] =>
+            { (COMPOUND)
+              [UID0] =>
+                forestry.boolTrue (類型 ID: 8)
+              [UID1] =>
+                forestry.boolTrue (類型 ID: 8)
+              [Slot] =>
+                5 (類型 ID: 1)
+            }
+          [7] =>
+            { (COMPOUND)
+              [UID0] =>
+                forestry.toleranceBoth5 (類型 ID: 8)
+              [UID1] =>
+                forestry.toleranceBoth5 (類型 ID: 8)
+              [Slot] =>
+                7 (類型 ID: 1)
+            }
+          [8] =>
+            { (COMPOUND)
+              [UID0] =>
+                forestry.boolTrue (類型 ID: 8)
+              [UID1] =>
+                forestry.boolTrue (類型 ID: 8)
+              [Slot] =>
+                8 (類型 ID: 1)
+            }
+          [9] =>
+            { (COMPOUND)
+              [UID0] =>
+                forestry.boolTrue (類型 ID: 8)
+              [UID1] =>
+                forestry.boolTrue (類型 ID: 8)
+              [Slot] =>
+                9 (類型 ID: 1)
+            }
+          [10] =>
+            { (COMPOUND)
+              [UID0] =>
+                extrabees.flower.rock (類型 ID: 8)
+              [UID1] =>
+                extrabees.flower.rock (類型 ID: 8)
+              [Slot] =>
+                10 (類型 ID: 1)
+            }
+          [11] =>
+            { (COMPOUND)
+              [UID0] =>
+                forestry.floweringSlowest (類型 ID: 8)
+              [UID1] =>
+                forestry.floweringSlowest (類型 ID: 8)
+              [Slot] =>
+                11 (類型 ID: 1)
+            }
+          [12] =>
+            { (COMPOUND)
+              [UID0] =>
+                forestry.territoryAverage (類型 ID: 8)
+              [UID1] =>
+                forestry.territoryAverage (類型 ID: 8)
+              [Slot] =>
+                12 (類型 ID: 1)
+            }
+          [13] =>
+            { (COMPOUND)
+              [UID0] =>
+                forestry.effectNone (類型 ID: 8)
+              [UID1] =>
+                forestry.effectNone (類型 ID: 8)
+              [Slot] =>
+                13 (類型 ID: 1)
+            }
+        ]
+    }
+  [MaxH] =>
+    10 (類型 ID: 3)
+  [IsAnalyzed] =>
+    0 (類型 ID: 1)
+  [Health] =>
+    10 (類型 ID: 3)
+}
+-------------------------------------------
