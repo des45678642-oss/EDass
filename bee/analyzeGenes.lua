@@ -15,6 +15,28 @@ local function decode(tag)
     return temp[3].value
 end
 
+--注意：ME网络返回的物品没有 individual；NBT里只有 GEN(代数)，没有始祖种标记(实测始祖种也没有 NA)，
+--所以没有 individual 时 isNatural 一律是 false，不可信。要判断始祖种请把物品存进数据库升级后再读取 individual.isNatural
+local function readNbtFlags(stack)
+    local individual = stack.individual or {}
+    local isNatural, generation = individual.isNatural, individual.generation
+    if (isNatural == nil or generation == nil) and stack.tag then
+        local tag = decode(stack.tag)
+        if tag then
+            --Forestry 的NBT：NA=始祖种(只有始祖种才有这个键)，GEN=第几代
+            if isNatural == nil then
+                local na = tag.NA or tag.IsNatural
+                isNatural = na ~= nil and na.value ~= 0 and na.value ~= false
+            end
+            if generation == nil then
+                local gen = tag.GEN or tag.Generation
+                generation = gen and gen.value
+            end
+        end
+    end
+    return isNatural == true, generation or 0
+end
+
 --寿命：1-早夭，2-较短寿，3-短寿，4-不足寿，5-一般，6-足寿，7-长寿，8-较长寿，9-最长寿，10-永生
 local lifespanLevel = { ["forestry.lifespanShortest"]=1, ["forestry.lifespanShorter"]=2, ["forestry.lifespanShort"]=3, ["forestry.lifespanShortened"]=4, ["forestry.lifespanNormal"]=5, ["forestry.lifespanElongated"]=6, ["forestry.lifespanLong"]=7, ["forestry.lifespanLonger"]=8, ["forestry.lifespanLongest"]=9, ["gregtech.lifeEon"]=10 }
 --工作速度：1-最慢，2-较慢，3-慢速，4-一般，5-快速，6-较快，7-最快，8-急速
@@ -39,6 +61,7 @@ local toleranceDominance = { ["forestry.toleranceUp1"]=true, ["forestry.toleranc
 local original_genes = {}
 local function getOriginalGenes(stack, species, species2)
     species2 = species2 or species
+    local isNatural, generation = readNbtFlags(stack)
     database.set(1, stack.name, 0, '{IsAnalyzed:1b,Genome:{Chromosomes:[0:{Slot:0b,UID0:"'..species..'",UID1:"'..species2..'"}]}}')
     local individual  = database.get(1)--[[@as table]].individual
     local lifespanList = { [10]=1, [20]=2, [30]=3, [35]=4, [40]=5, [45]=6, [50]=7, [60]=8, [70]=9, [600]=10 }
@@ -49,8 +72,8 @@ local function getOriginalGenes(stack, species, species2)
         label = stack.label,
         size = stack.size,--数量
         maxSize = stack.maxSize,--最大堆叠数
-        isNatural = stack.individual.isNatural,--是否为始祖种
-        generation = stack.individual.generation or 0,--第几代
+        isNatural = isNatural,--是否为始祖种
+        generation = generation,--第几代
         species = { individual.active.species.uid, individual.inactive.species.uid },--种族
         lifespan = { lifespanList[individual.active.lifespan], lifespanList[individual.inactive.lifespan] },--寿命
         speed = { math.floor((individual.active.speed / 0.23)), math.floor((individual.inactive.speed / 0.23)) },--工作速度
@@ -82,7 +105,7 @@ local function analyzeBee(stack)--返回值只有部分基因能正确表示显�
             if next(genes) then
                 error("蜜蜂NBT数据格式错误")
             end
-            return getOriginalGenes(stack.name, t.value.UID0.value, t.value.UID1.value)
+            return getOriginalGenes(stack, t.value.UID0.value, t.value.UID1.value)
         end
         genes[t.value.Slot.value] = { t.value.UID0.value, t.value.UID1.value }
     end
@@ -96,7 +119,8 @@ local function analyzeBee(stack)--返回值只有部分基因能正确表示显�
         original_genes[genes[0][2]] = (database.get(1)--[[@as any]]).individual.active.species
     end
     --检查显性种族基因与适应性基因
-    if stack.individual.ident and genes[0][1] ~= stack.individual.ident then
+    local ident = stack.individual and stack.individual.ident
+    if ident and genes[0][1] ~= ident then
         genes[0] = { genes[0][2], genes[0][1] }
     end
     if not toleranceDominance[genes[4][1]] and toleranceDominance[genes[4][2]] then
@@ -115,8 +139,8 @@ local function analyzeBee(stack)--返回值只有部分基因能正确表示显�
         label = stack.label,
         size = stack.size,--数量
         maxSize = stack.maxSize,--最大堆叠数
-        isNatural = stack.individual.isNatural,--是否为始祖种
-        generation = stack.individual.generation or 0,--第几代
+        isNatural = select(1, readNbtFlags(stack)),--是否为始祖种
+        generation = select(2, readNbtFlags(stack)),--第几代
         species = genes[0],--种族
         lifespan = { lifespanLevel[genes[2][1]], lifespanLevel[genes[2][2]] },--寿命
         speed = { speedLevel[genes[1][1]], speedLevel[genes[1][2]] },--工作速度
@@ -144,7 +168,28 @@ local analyzeGenes = function(stack)
     end
 end
 
-return analyzeGenes
+--可以像函数一样调用；analyzeGenes.isNatural(stack) 只读NBT，不占用数据库升级
+return setmetatable({
+    isNatural = function(stack) return (readNbtFlags(stack)) end,
+    --除错用：列出这个物品是否有 individual、NBT根节点有哪些键，以及 IsNatural 的值
+    debug = function(stack)
+        local ind = stack.individual
+        local parts = { "individual=" .. (ind and ("有(isNatural=" .. tostring(ind.isNatural) .. ")") or "无") }
+        local tag, err = nil, "无tag"
+        if stack.tag then tag, err = decode(stack.tag) end
+        if tag then
+            local keys = {}
+            for k, v in pairs(tag) do
+                keys[#keys + 1] = k .. "=" .. ((type(v) == "table" and type(v.value) ~= "table") and tostring(v.value) or "…")
+            end
+            table.sort(keys)
+            parts[#parts + 1] = "NBT{" .. table.concat(keys, ",") .. "}"
+        else
+            parts[#parts + 1] = "NBT解析失败:" .. tostring(err)
+        end
+        return table.concat(parts, " ")
+    end,
+}, { __call = function(_, stack) return analyzeGenes(stack) end })
 --[[
 database.set(1, "Forestry:beePrincessGE", 0, '{MaxH:10,IsAnalyzed:1b,Genome:{Chromosomes:['..
 '0:{Slot:0b,UID0:"gregtech.bee.speciesStardust",UID1:"gregtech.bee.speciesStardust"},'..

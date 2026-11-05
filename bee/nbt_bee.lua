@@ -1,6 +1,8 @@
 local component = require("component")
 local database = component.database
 local analyzeGenes = require("analyzeGenes") -- 載入您寫好的 analyzeGenes 模組
+local robot = require("robot")
+local inventory_controller = component.inventory_controller
 
 -- 1. 自訂一個格式化對照表，讓輸出的數值變成看得懂的中文
 local readable = {
@@ -15,13 +17,21 @@ local readable = {
 }
 
 -- 2. 獲取資料庫中的物品（請確保槽位與您的實際環境一致，這裡設定為 8 號槽位）
-local slot = 8
-local itemStack = database.get(slot)
+local slot = 1
+local itemStack = inventory_controller.getStackInInternalSlot(slot)
 
 if not itemStack or not itemStack.tag then
     print("【錯誤】槽位 " .. slot .. " 是空的，或者該物品不包含 NBT (.tag) 數據！")
     return
 end
+
+local analyzeGenesMod = require("analyzeGenes")
+print("原始: " .. analyzeGenesMod.debug(itemStack))      -- 有 individual 的狀態
+local saved = itemStack.individual
+itemStack.individual = nil
+print("無individual: " .. analyzeGenesMod.debug(itemStack))  -- 看 NBT 有沒有 NA=...
+print("NBT判斷始祖種: " .. tostring(analyzeGenesMod.isNatural(itemStack)))
+itemStack.individual = saved
 
 -- 3. 補全建構 analyzeBee 所需的 individual 基礎結構
 itemStack.individual = itemStack.individual or {}

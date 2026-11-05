@@ -1031,23 +1031,6 @@ function M.task(species)--制定突变链
     end
     --计算突变路径
     print("计算突变路径")
-    do
-        local targetTag = beeData.getDroneTag(species)
-        if targetTag then
-            local targetSlot = bot.checkItem({name="Forestry:beeDroneGE",tag=targetTag}, 1)
-            if targetSlot then
-                local previousLabel = bot.inventoryLabel
-                bot.inventoryLabel = "newSpecies:"..species
-                local optimizedDroneSlot, optimizedPrincessSlot = M.purify(nil, targetSlot, nil, nil, ":newSpecies")
-                bot.inventoryLabel = previousLabel
-                if optimizedDroneSlot and optimizedPrincessSlot then
-                    return optimizedDroneSlot, optimizedPrincessSlot
-                else
-                    error(string.format("优化%s蜂过程中发生基因丢失", species))
-                end
-            end
-        end
-    end
     local mutationChain, lackSpecies = {}, {}
     if not beeData.initialized then
         if not beeData.getDroneTag("forestry.speciesWintry") then
@@ -1214,6 +1197,18 @@ function M.task(species)--制定突变链
     --执行
     if not beeData.initialized then
         M.initialize()
+        --目标品种本来就在ME里（例如放入的田野蜂），初始化完成后直接优化它
+        if #mutationChain == 0 and beeData.getDroneTag(species) then
+            print("目标品种已存在，正在优化基因...")
+            local droneSlot, princessSlot = M.optimizeSpecies(species)
+            robot.select(droneSlot)
+            upgrade_me.sendItems()
+            robot.select(princessSlot)
+            upgrade_me.sendItems()
+            print("优化完成！")
+            device.destruct()
+            return
+        end
     end
     for i = 1, #mutationChain do
         print(string.format("正在培育%s蜂", mutationChain[i][2].name))
@@ -1260,7 +1255,7 @@ function M.initialize()--初始化至田野蜂以制造样板蜂
     print("  田野蜂雄蜂                          -> 直接完成初始化")
     print("  寻常蜂雄蜂 + 石头样板雄蜂             -> 直接培育田野蜂")
     print("  石头样板雄蜂 + 凛冬样板雄蜂(含石头性状) -> 直接培育寻常蜂")
-    print("  单独一种样板雄蜂                    -> 跳过它对应的提纯步骤")
+    print("  单独一种样板雄蜂                    -> 跳过它对应的提纯步骤（不再需要凛冬公主蜂）")
     io.write("放好后按回车继续（没有就直接按回车）：")
     io.read()
     local adopted = beeUtil.classifyAdopted(bot.inventory, templateGenes)
@@ -1299,10 +1294,28 @@ function M.initialize()--初始化至田野蜂以制造样板蜂
     if not skipTemplates then
         local need2 = adopted.template2 == nil
         local need3 = adopted.template3 == nil
-        local need1 = (need2 or need3) and adopted.template1 == nil
+        --放进任何一种样板雄蜂，它都能当辅助雄蜂提供全部样板基因，因此不再需要适应性全5的凛冬公主蜂，
+        --也不必再提纯凛冬样板；只有一只样板雄蜂都没有时才走完整流程
+        local need1 = adopted.template1 == nil and adopted.template2 == nil and adopted.template3 == nil
         local princess1Slot, drone1Slot, drone2Slot, princess2Slot
+        local function getNaturalPrincess()
+            local slot = bot.checkItem({name="Forestry:beePrincessGE",tag=beeData.getPrincessTag(true)}, 1)
+            if not slot then
+                error("初始化失败：ME网络内缺少初始公主蜂")
+            end
+            return slot
+        end
+        local function getWintryDrones()
+            return doUntil(function()
+                return bot.checkItem({name="Forestry:beeDroneGE",tag=
+                    doUntil(function()
+                        return beeData.getDroneTag("forestry.speciesWintry")
+                    end, "缺少凛冬雄蜂")
+                }, 16)
+            end, "缺少凛冬雄蜂")
+        end
         --温度适应性5与湿度适应性5的凛冬公主蜂
-        if need1 or need2 then
+        if need1 then
             print("请提供一只使用适应性调整器将温度适应性、湿度适应性均调整到全5的始祖种凛冬公主蜂")
             bot.inventoryLabel = "initialize:getingTorlance5Princess"
             while true do
@@ -1322,15 +1335,7 @@ function M.initialize()--初始化至田野蜂以制造样板蜂
             end
             bot.inventoryLabel = previousLabel
             bot.inventory[princess1Slot].inventoryLabel = previousLabel
-        end
-        if need1 then
-            local wintryDroneSlot = doUntil(function()
-                return bot.checkItem({name="Forestry:beeDroneGE",tag=
-                    doUntil(function()
-                        return beeData.getDroneTag("forestry.speciesWintry")
-                    end, "缺少凛冬雄蜂")
-                }, 16)
-            end, "缺少凛冬雄蜂")
+            local wintryDroneSlot = getWintryDrones()
             print("正在提纯温度适应性全5、湿度适应性全5基因")
             drone1Slot, princess1Slot = M.purify(princess1Slot, wintryDroneSlot, templateGenes[1], wintryDroneSlot, ":initializing1")
             if not drone1Slot then
@@ -1345,6 +1350,10 @@ function M.initialize()--初始化至田野蜂以制造样板蜂
         end
         --夜行、穴居、耐雨、石头采蜜的石头蜂
         if need2 then
+            local assistant1Slot = drone1Slot or adopted.template3
+            if not princess1Slot then
+                princess1Slot = getNaturalPrincess()
+            end
             drone2Slot = doUntil(function()
                 return bot.checkItem({name="Forestry:beeDroneGE",tag=
                     doUntil(function()
@@ -1353,7 +1362,7 @@ function M.initialize()--初始化至田野蜂以制造样板蜂
                 }, 1)
             end, "缺少石头雄蜂")
             print("正在向石头蜂引入生育4x、温度适应性全5、湿度适应性全5基因")
-            drone2Slot, princess1Slot = M.purify(princess1Slot, drone2Slot, templateGenes[2], drone1Slot, ":initializing2")
+            drone2Slot, princess1Slot = M.purify(princess1Slot, drone2Slot, templateGenes[2], assistant1Slot, ":initializing2")
             if not drone2Slot then
                 error("初始化失败")
             end
@@ -1362,13 +1371,14 @@ function M.initialize()--初始化至田野蜂以制造样板蜂
         end
         --同性状凛冬蜂
         if need3 then
-            princess2Slot = bot.checkItem({name="Forestry:beePrincessGE",tag=beeData.getPrincessTag(true)}, 1)
-            if not princess2Slot then
-                error("初始化失败：ME网络内缺少初始公主蜂")
-            end
+            princess2Slot = getNaturalPrincess()
             print("正在向凛冬蜂引入采蜜对象石头、夜行性、耐雨飞行性、穴居性基因")
-            robot.select(drone1Slot--[[@as number]])
-            robot.dropUp(robot.count(drone1Slot--[[@as number]])-1)
+            if drone1Slot then
+                robot.select(drone1Slot--[[@as number]])
+                robot.dropUp(robot.count(drone1Slot--[[@as number]])-1)
+            else
+                drone1Slot = getWintryDrones()--没有凛冬样板雄蜂时，直接用ME内的凛冬雄蜂，由石头样板雄蜂提供其余基因
+            end
             drone1Slot, princess2Slot = M.purify(princess2Slot, drone1Slot, templateGenes[3], drone2Slot, ":initializing3")
         else
             if drone1Slot and drone1Slot ~= adopted.template3 then

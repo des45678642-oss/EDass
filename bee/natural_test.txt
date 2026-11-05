@@ -1,0 +1,6 @@
+槽位 1 : Cultivated Princess
+原始      : individual=有(isNatural=true) NBT{GEN=59,Genome=…,Health=10,IsAnalyzed=0,MaxH=10}
+無individual: individual=无 NBT{GEN=59,Genome=…,Health=10,IsAnalyzed=0,MaxH=10}
+NBT判斷始祖種 = false
+individual 原本的 isNatural = true
+

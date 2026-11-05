@@ -215,15 +215,26 @@ function M.getPrincessTag(isNatural)
     if isNatural and data.usingPrincessTag and bot.checkItem({name="Forestry:beePrincessGE",tag=data.usingPrincessTag}) then
         return data.usingPrincessTag
     end
-    local princess = doUntil(function()
-        local princessList = upgrade_me.getItemsInNetwork({name = "Forestry:beePrincessGE"})
-        for _, p in pairs(princessList) do
-            if p.individual.isNatural == (isNatural == true) and isPrincessAvailable(p.tag) then
-                return p
+    local wantNatural = isNatural == true
+    --ME网络返回的物品既没有 individual 字段，NBT里也没有始祖种标记；
+    --只有存进数据库升级后再读取，才能拿到 individual.isNatural
+    local function findInME()
+        local i = 1
+        while database.clear(i) do i = i + 1 end
+        upgrade_me.store({name = "Forestry:beePrincessGE"}, database.address, 1)
+        for slot = 1, 81 do
+            local ok, stack = pcall(database.get, slot)
+            if not ok or not stack then break end
+            if stack.tag and stack.individual and stack.individual.isNatural == wantNatural and isPrincessAvailable(stack.tag) then
+                return stack
             end
         end
+    end
+    local princess = doUntil(function()
+        local found = findInME()
+        if found then return found end
         for _, item in pairs(bot.inventory) do
-            if item and item.name == "Forestry:beePrincessGE" and item.isNatural == (isNatural == true) and isPrincessAvailable(item.tag) then
+            if item and item.name == "Forestry:beePrincessGE" and item.isNatural == wantNatural and isPrincessAvailable(item.tag) then
                 return item
             end
         end

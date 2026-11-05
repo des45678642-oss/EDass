@@ -18,25 +18,82 @@ if inventorySize < 32 then
 end
 
 --监听inventory_changed事件，维护物品栏映射表
+--事件处理函数只负责登记“哪一格变了”，真正的分析（会用到数据库升级与 os.sleep）在处理函数之外进行：
+--1. 避免在事件处理函数里再嵌套 os.sleep/event.pull，造成事件重入；
+--2. 机器人移动期间不做分析，移动结束后再统一刷新。
 M.inventory, M.inventoryLabel = {}, nil
-function M.updateInventory(_, slot)
+local pendingSlots, pendingOrder, processing, busy = {}, {}, false, 0
+
+local function logError(msg)
+    local f = io.open("/home/bot_error.log", "a")
+    if f then f:write(os.date("%H:%M:%S ") .. tostring(msg) .. "\n") f:close() end
+end
+
+local function analyzeSlot(slot)
     local stack = inventory_controller.getStackInInternalSlot(slot)
     if stack then
-        local success, result = pcall(analyzeGenes, stack)
+        local success, result = xpcall(analyzeGenes, debug.traceback, stack)
         if success then
             M.inventory[slot] = result
         else
             M.inventory[slot] = stack
             M.inventory[slot].type = "others"
+            --记录分析失败的原因，否则蜜蜂会静悄悄变成 others，之后在别处报出莫名其妙的错误
+            M.inventory[slot].analyzeError = result
+            if stack.name == "Forestry:beeDroneGE" or stack.name == "Forestry:beePrincessGE" then
+                logError("第" .. slot .. "格蜜蜂分析失败: " .. tostring(result))
+                print("警告：第" .. slot .. "格蜜蜂分析失败（详情见 /home/bot_error.log）")
+            end
         end
         M.inventory[slot].inventoryLabel = M.inventoryLabel
     else
         M.inventory[slot] = nil
     end
-    os.sleep(0)
+end
+
+--取得物品后，等事件更新映射表可能来不及；这里直接读取该格并同步刷新，最多等约1秒
+function M.refreshSlot(slot)
+    for _ = 1, 20 do
+        if M.inventory[slot] then return true end
+        if robot.count(slot) > 0 then
+            local ok, err = pcall(analyzeSlot, slot)
+            if not ok then logError("刷新物品栏第" .. slot .. "格失败: " .. tostring(err)) end
+            if M.inventory[slot] then return true end
+        end
+        os.sleep(0.05)
+    end
+    return M.inventory[slot] ~= nil
+end
+
+function M.flushInventory()
+    if processing or busy > 0 then return end
+    processing = true
+    while #pendingOrder > 0 do
+        local slot = table.remove(pendingOrder, 1)
+        pendingSlots[slot] = nil
+        local ok, err = pcall(analyzeSlot, slot)
+        if not ok then logError("更新物品栏第" .. slot .. "格失败: " .. tostring(err)) end
+    end
+    processing = false
+end
+
+function M.updateInventory(_, slot)
+    if not pendingSlots[slot] then
+        pendingSlots[slot] = true
+        pendingOrder[#pendingOrder + 1] = slot
+    end
+    if busy == 0 and not processing then
+        M.flushInventory()
+    end
     return true
 end
 event.listen("inventory_changed", M.updateInventory)
+
+local function beginBusy() busy = busy + 1 end
+local function endBusy()
+    busy = busy - 1
+    if busy == 0 then M.flushInventory() end
+end
 
 --robot库物品栏操作函数重定向
 local t, e = robot.transferTo, inventory_controller.equip
@@ -83,30 +140,38 @@ end
 local position,direction = {x=0,y=1,z=0},{x=0,z=-1}
 local f, b, u, d, l, r = robot.forward, robot.back, robot.up, robot.down, robot.turnLeft, robot.turnRight
 function M.up()
+    beginBusy()
     while not u() do
         os.sleep(0)
     end
     position.y = position.y + 1
+    endBusy()
 end
 function M.down()
+    beginBusy()
     while not d() do
         os.sleep(0)
     end
     position.y = position.y - 1
+    endBusy()
 end
 function M.forward()
-	while not f() do
+    beginBusy()
+    while not f() do
         os.sleep(0)
     end
-	position.x=position.x+direction.x
-	position.z=position.z+direction.z
+    position.x=position.x+direction.x
+    position.z=position.z+direction.z
+    endBusy()
 end
 function M.back()
+    beginBusy()
     while not b() do
         os.sleep(0)
     end
     position.x = position.x - direction.x
     position.z = position.z - direction.z
+    endBusy()
 end
 robot.forward, robot.back, robot.up, robot.down = M.forward, M.back, M.up, M.down
 function M.turnLeft()
@@ -321,7 +386,7 @@ function M.checkItem(filter, request)
     end
     if stack then
         upgrade_me.requestItems(database.address, 1, request - count)
-        if M.inventory[targetSlot] then
+        if M.refreshSlot(targetSlot) then
             return targetSlot
         end
     end
@@ -388,7 +453,7 @@ function M.checkItemByTag(filter, request)
     local stack = database.get(dbIdx)
     if stack and stack.tag == filter.tag then
         upgrade_me.requestItems(database.address, dbIdx, request - count)
-        if M.inventory[targetSlot] then
+        if M.refreshSlot(targetSlot) then
             return targetSlot
         end
     end

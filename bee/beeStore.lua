@@ -93,8 +93,19 @@ function M.save(path, data)
         return false, "寫入後驗證失敗，已保留原本的 " .. path
     end
     os.remove(path)
-    local ok, rerr = os.rename(tmp, path)
-    if not ok then return false, "無法取代 " .. path .. ": " .. tostring(rerr) end
+    --OpenOS 的 os.rename 有時不回傳成功值，不能只看回傳值，改成讀回檔案內容確認
+    pcall(os.rename, tmp, path)
+    if read_all(path) == text then
+        os.remove(tmp)
+        return true
+    end
+    --rename 沒生效：直接把已驗證過的內容寫進正式檔
+    local out, werr = io.open(path, "wb")
+    if not out then return false, "無法寫入 " .. path .. ": " .. tostring(werr) .. "（新資料保留在 " .. tmp .. "）" end
+    out:write(text)
+    out:close()
+    if read_all(path) ~= text then return false, "無法取代 " .. path .. "（新資料保留在 " .. tmp .. "）" end
+    os.remove(tmp)
     return true
 end
 
