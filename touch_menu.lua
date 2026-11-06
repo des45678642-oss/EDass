@@ -42,7 +42,7 @@ local query_full_threshold    = 8        -- auto 模式下，物品超過幾個�
 
 -- 🌟 【礦機調度 (mode_tag = "miner")】對應原本的 space_main.lua，需要本機有 modem 和轉運器
 local miner_port              = 300      -- 與 space_miner.lua 約定的通訊埠
-local miner_strength          = 16       -- 對礦機發信的強度 (送完會還原成原本的強度)
+local miner_strength          = 400       -- 對礦機發信的強度 (送完會還原成原本的強度)
 local miner_transposer_address = nil     -- 轉運器位址前綴；nil = 用預設那台
 local miner_chest_side        = 1        -- 轉運器貼著共享終界箱的方向
 local drone_item_name         = "gtnhintergalactic:item.MiningDrone"

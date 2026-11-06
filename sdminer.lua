@@ -47,7 +47,12 @@ end
 -- 【網路】訊息放進佇列，每秒只送幾則，避免一次塞爆 (原本靠 os.sleep(0.1) 間隔)
 -- ========================================================
 local function enqueue(to, ...)
-    S.queue[#S.queue + 1] = { to = to, args = { ... } }
+    local args = { ... }
+    S.queue[#S.queue + 1] = { 
+        to = to, 
+        args = args, 
+        n = select("#", ...) -- 紀錄精確的參數數量
+    }
 end
 
 local function with_strength(fn)
@@ -64,16 +69,29 @@ end
 
 local function drain(limit, now)
     if #S.queue == 0 then return end
+    
+    -- 1. 先在最外層宣告好 item，避免閉包與迴圈產生變數污染
+    local item 
+    
     with_strength(function(modem, m)
         for _ = 1, limit do
-            local item = table.remove(S.queue, 1)
+            item = table.remove(S.queue, 1) -- 2. 這裡直接賦值，不加 local
             if not item then break end
-            if item.to then modem.send(item.to, m.miner_port, table.unpack(item.args))
-            else modem.broadcast(m.miner_port, table.unpack(item.args)) end
+            
+            -- 3. 使用安全展開（帶入正確的參數長度，防止 nil 截斷）
+            local args_count = item.n or #item.args
+            
+            if item.to then 
+                modem.send(item.to, m.miner_port, table.unpack(item.args, 1, args_count))
+            else 
+                modem.broadcast(m.miner_port, table.unpack(item.args, 1, args_count)) 
+            end
             S.last_send = now
         end
     end)
 end
+
+
 
 -- 礦機註冊 (冷卻期間也會處理；已登記過的礦機重新開機後也會收到回覆)
 local function on_modem_message(_, _, remote, port, _, cmd, arg1)
@@ -170,6 +188,8 @@ local function dispatch()
         miner.busy, miner.item = true, it.label
         S.assigned[it.label] = (S.assigned[it.label] or 0) + 1
         reserved[drone.slot] = (reserved[drone.slot] or 0) + 1
+		-- 除錯用
+		--print(string.format("[Debug] Dispatch to %s: Slot=%s, Dist=%s", uuid, tostring(drone.slot), tostring(it.distance)))
         enqueue(uuid, "SET_MACHINE", 0, 0, it.distance)
         enqueue(uuid, "PUSH_MATERIAL", drone.slot, 1)
     end
