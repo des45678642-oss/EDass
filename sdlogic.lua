@@ -641,7 +641,9 @@ function sdlogic.render_page2()
     end
 
     -- 分頁：全部物品照常運算與下單，但畫面只顯示目前這一頁
-    local per_page = ctx.items_per_page
+    -- 每頁行數再用 list_last_row 限制一次，清單絕不會畫進底部按鈕列
+    local last_row = ctx.list_last_row or ctx.SCR_H
+    local per_page = math.max(1, math.min(ctx.items_per_page, last_row - 15))
     local pages = math.max(1, math.ceil(#monitor_items / per_page))
     ctx.list_page = math.min(math.max(ctx.list_page, 1), pages)
     ctx.list_pages = pages
@@ -847,7 +849,7 @@ function sdlogic.render_page2()
         
         -- 渲染至螢幕 (只畫改變的列)
         local row_pos = 15 + (idx - first_idx + 1)
-        if idx >= first_idx and idx <= last_idx and row_pos <= ctx.SCR_H then
+        if idx >= first_idx and idx <= last_idx and row_pos <= last_row then
             put(6, row_pos, string.format("  [%02d]|", idx) .. fit(item_name, 35) ..
                 string.format("|%11s |", count_str) .. fit(status_msg, 28) .. "      ", color)
         end

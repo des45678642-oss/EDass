@@ -1527,18 +1527,18 @@ test("touch_menu loads without a database component and binds screen before draw
     truthy(listeners.modem_message, "query listener not registered")
     menu.handle_touch(40, 4)             -- "AE2" tab
     menu.list_pages = 3
-    menu.handle_touch(85, 4)             -- next
+    menu.handle_touch(45, 48)           -- next
     eq(menu.list_page, 2)
-    menu.handle_touch(85, 4)
+    menu.handle_touch(45, 48)
     eq(menu.list_page, 3)
-    menu.handle_touch(85, 4)             -- already last: no change
+    menu.handle_touch(45, 48)           -- already last: no change
     eq(menu.list_page, 3)
-    menu.handle_touch(70, 4)             -- prev
+    menu.handle_touch(10, 48)           -- prev
     eq(menu.list_page, 2)
     menu.handle_touch(10, 4)             -- back to the clock page
-    menu.handle_touch(85, 4)
+    menu.handle_touch(45, 48)
     eq(menu.list_page, 1, "pager must be inactive on the clock page / reset on switch")
-    eq(menu.query_port, 102); eq(menu.items_per_page, 35); truthy(menu.get_now_time)
+    eq(menu.query_port, 102); eq(menu.items_per_page, 30); eq(menu.list_last_row, 45); truthy(menu.get_now_time)
     eq(menu.realtime_path, nil, "clock settings are gone")
     menu.stop()
     eq(listeners.modem_message, nil, "listener must be removed on stop")
@@ -1588,16 +1588,16 @@ test("touch_menu: start() scans the database; the scan button adds items found l
     rawset(component, "database", db_with(slots))
     menu.db = component.database
     menu.handle_touch(40, 4)                -- go to page 2
-    menu.handle_touch(120, 4)               -- scan button
+    menu.handle_touch(70, 48)               -- scan button
     eq(#sdlogic.load_hybrid_config(), 3)
     truthy(menu.scan_message.text:find("新增 1", 1, true) and menu.scan_message.text:find("Copper", 1, true), menu.scan_message.text)
     local shown = false
     for _, st in ipairs(gpu.sets) do if st.y == 13 and st.s:find("Copper", 1, true) then shown = true end end
     truthy(shown, "result message drawn on row 13")
-    menu.handle_touch(120, 4)               -- nothing new the second time
+    menu.handle_touch(70, 48)               -- nothing new the second time
     truthy(menu.scan_message.text:find("沒有新增", 1, true))
     menu.handle_touch(10, 4)
-    menu.handle_touch(120, 4)               -- scan button is inactive on the clock page
+    menu.handle_touch(70, 48)               -- scan button is inactive on the clock page
     eq(#sdlogic.load_hybrid_config(), 3)
     menu.stop()
     cleanup()
@@ -1611,7 +1611,7 @@ test("touch_menu: scan failure is shown, not thrown", function()
     menu.config_file_path = path
     menu.start()
     truthy(menu.scan_message and menu.scan_message.color == 0xFF5555, "error colour")
-    menu.handle_touch(40, 4); menu.handle_touch(120, 4)
+    menu.handle_touch(40, 4); menu.handle_touch(70, 48)
     truthy(menu.scan_message.text:find("失敗", 1, true))
     eq(read(path), "{ broken", "broken file untouched")
     menu.stop()

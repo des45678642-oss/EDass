@@ -105,22 +105,25 @@ end
 
 local btn1 = { x = 5,  y = 3, w = 25, h = 4, label = "     電池電量     " }
 local btn2 = { x = 35, y = 3, w = 25, h = 4, label = "   AE2 核心物資倉   " }
--- 第二頁專用：物品清單換頁鍵
-local btn_prev = { x = 65, y = 3, w = 14, h = 4, label = "◀ 上一頁" }
-local btn_next = { x = 81, y = 3, w = 14, h = 4, label = "下一頁 ▶" }
+local SCR_W, SCR_H = 160, 50
+-- 第二頁專用：底部按鈕列 (上一頁 / 頁碼 / 下一頁 / 掃描新增物品)
+local bar_y = SCR_H - 3                  -- 按鈕列從第 47 列開始，高 3 列
+local btn_prev = { x = 6,   y = bar_y, w = 16, h = 3, label = " ◀ 上一頁" }
+local pager_text_x = 24                  -- 頁碼顯示在兩個換頁鍵中間
+local btn_next = { x = 42,  y = bar_y, w = 16, h = 3, label = " 下一頁 ▶" }
 -- 第二頁專用：即時掃描 database 並新增尚未登錄的物品
-local btn_scan = { x = 115, y = 3, w = 22, h = 4, label = "🔍 掃描新增物品" }
+local btn_scan = { x = 62,  y = bar_y, w = 22, h = 3, label = "🔍 掃描新增物品" }
 -- 第二頁專用：立刻回收全部礦機並重新分配 (原本 space_main 的「按 Enter 手動刷新」)
 local btn_miner = { x = 139, y = 3, w = 20, h = 4, label = "⛏ 重新分配礦機" }
 local database_slots = 81            -- database 升級最大格數 (Tier 3)
-local items_per_page = 35               -- 第 16 列起到螢幕底部
+-- 清單從第 16 列開始，最多畫到按鈕列上方分隔線的前一列 (第 45 列)，避免蓋到按鈕
+local list_first_row = 16
+local items_per_page = (bar_y - 2) - list_first_row + 1   -- = 30
 local list_page, list_pages = 1, 1
 
 -- component.database 在沒有資料庫升級時會直接拋錯，需先檢查
 local db = nil
 if component.isAvailable("database") then db = component.database end
-local SCR_W, SCR_H = 160, 50
-
 -- GTNH 2.9 之後物品與流體都要從 fluid_interface 查；舊版沒有它就退回 me_interface / me_controller
 local ae = nil
 if component.isAvailable("fluid_interface") then ae = component.fluid_interface
@@ -143,6 +146,7 @@ M.battery, M.jukebox = battery_comp, jukebox_comp
 M.energy_threshold, M.high_threshold = low_energy_threshold, high_energy_threshold
 M.query_port, M.relay_port = query_port, relay_port
 M.items_per_page = items_per_page
+M.list_last_row = bar_y - 2          -- 清單最多畫到這一列，sdlogic 會用它限制每頁行數
 M.miner_port, M.miner_strength, M.miner_transposer = miner_port, miner_strength, transposer_comp
 M.miner_chest_side, M.drone_item_name = miner_chest_side, drone_item_name
 M.miner_cooldown, M.miner_dispatch_interval = miner_cooldown, miner_dispatch_interval
@@ -176,7 +180,7 @@ function M.draw_pager()
     draw_btn(btn_miner, sdminer.is_active())
     gpu.setBackground(0x000000)
     gpu.setForeground(0xFFFF00)
-    gpu.set(btn_next.x + btn_next.w + 2, btn_prev.y + 1, string.format("第 %d / %d 頁      ", M.list_page, M.list_pages))
+    gpu.set(pager_text_x, bar_y + 1, sdlogic.fit(string.format(" 第 %d / %d 頁", M.list_page, M.list_pages), btn_next.x - pager_text_x))
     gpu.setForeground(0xFFFFFF)
 end
 
@@ -238,6 +242,9 @@ local function init_page_background()
             gpu.set(6, 14, "  物 資 名 稱 ( ITEM LABEL )               |  目前庫存  | 自動補貨狀態 ( STATUS )")
             gpu.set(6, 15, "  ────────────────────────────────────────+────────────+───────────────────────────────────────────────")
         end
+        gpu.setForeground(0x555555)
+        gpu.set(1, bar_y - 1, string.rep("─", SCR_W))   -- 清單與底部按鈕列的分隔線
+        M.draw_pager()                  -- 按鈕列在第 9 列以下，上面清畫面後要補畫
     end
     gpu.setForeground(0xFFFFFF)
 end
