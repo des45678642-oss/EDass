@@ -164,7 +164,8 @@ local function scan(x0, x1, z0, z1, step)
       if not top then report("ERROR", "量不到地表 " .. x .. "," .. z) return end
       vals[#vals + 1] = top
       first = first or x
-      go(0, top + LIFT - py, 0)              -- 維持在地表上方 LIFT 格
+      local adj = top + LIFT - py            -- 維持在地表上方約 LIFT 格；差不到 3 格就不動，省下一次移動 (電量和時間都省)
+      if math.abs(adj) >= 3 then go(0, adj, 0) end
     end
     report("SCAN", z, first, xstep, table.concat(vals, ","))
     dir = -dir

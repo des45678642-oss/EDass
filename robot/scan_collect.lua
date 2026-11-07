@@ -12,7 +12,7 @@ local OUT = "scan.txt"
 -- 掃描範圍 (世界方塊座標，含頭尾) 與取樣間隔。範圍外多留一圈平地，產生器才能校正高度
 local X0, X1 = -65, 360
 local Z0, Z1 = -640, -300
-local STEP = 2
+local STEP = 4       -- 取樣間隔：山體是平滑的，4 格足夠；改成 2 會多花 4 倍時間和電量
 
 -- 接續上次進度：scan.txt 已有資料就從最後一列的下一列開始 (無人機沒電中斷後重新執行即可)
 local last_z
@@ -39,7 +39,7 @@ local rows = 0
 while true do
   local raw = { event.pull(120, "modem_message") }
   if not raw[1] then
-    print("\n120 秒沒有收到資料 (無人機還在飛嗎？沒電了嗎？)，Ctrl+C 結束")
+    print("\n120 秒沒有新資料 (掃一列要好幾分鐘；無人機狀態文字是 CHARGE 代表在等電，其他請去看看它)，繼續等待，Ctrl+C 結束")
   elseif raw[4] == SERVER_PORT and raw[6] == TAG and raw[7] == "DRONE_REPORT" and raw[8] == "REPORT" then
     local kind = raw[9]
     if kind == "SCAN" then
