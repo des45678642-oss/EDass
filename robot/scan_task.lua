@@ -23,9 +23,9 @@ local LIFT = 12            -- 飛在地表上方幾格 (要高過前方的樹和
 local MIN_D, MAX_D = 4, 26 -- 攝影機距離的合理範圍 (攝影機最遠只看 32 格)
 local APPROACH_Y = 215 -- 出發時先升到這個高度，再飛向掃描起點 (要比搬遷地形最高處高；世界上限是 256)
 
--- 電量管理：每次連接卡發訊息約耗 100 點，補充只有每秒約 10 點，所以不能想飛就飛、想傳就傳。
--- 電量低於 LOW_FRAC 就原地懸停等充電，充到 RESUME_FRAC 才繼續 (等待期間無人機不耗電移動)。
-local LOW_FRAC, RESUME_FRAC = 0.30, 0.65
+-- 電量管理：每列只傳一次訊息 (約 100 點)，平常不需要等電；這裡只是保險，
+-- 電量低於 LOW_FRAC 就原地懸停等充電，充到 RESUME_FRAC 才繼續，避免半路沒電掉下去。
+local LOW_FRAC, RESUME_FRAC = 0.10, 0.30
 local function refuel(label)
   local maxe = computer.maxEnergy()
   if computer.energy() / maxe >= LOW_FRAC then return end
