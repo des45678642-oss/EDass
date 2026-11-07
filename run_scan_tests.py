@@ -14,7 +14,7 @@ ns = {"__file__": str(ROOT / "run_drone_tests.py"), "__name__": "sim"}
 sys.argv = [sys.argv[0], str(ROOT)]
 exec(SRC, ns)
 Sim, Done = ns["Sim"], ns["Done"]
-SCAN = (ROOT / "robot" / "scan_task.lua").read_text(encoding="utf-8")
+SCAN = ns["minified"]((ROOT / "robot" / "scan_task.lua").read_text(encoding="utf-8"))
 
 
 def make_world(height):

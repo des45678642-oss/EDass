@@ -12,7 +12,17 @@ import sys
 from lupa.lua53 import LuaRuntime
 
 ROOT = pathlib.Path(sys.argv[1] if len(sys.argv) > 1 else pathlib.Path(__file__).parent).resolve()
-CODE = (ROOT / "robot" / "drone_task.lua").read_text(encoding="utf-8")
+CODE_RAW = (ROOT / "robot" / "drone_task.lua").read_text(encoding="utf-8")
+
+def minified(code):
+    """和 server.lua 傳給無人機的內容一致 (去掉註解與縮排)，測試實際會下載到的程式。"""
+    from lupa.lua53 import LuaRuntime as _L
+    src = (ROOT / "robot" / "server.lua").read_text(encoding="utf-8")
+    m = src[src.index("-- MINIFY_BEGIN"):src.index("-- MINIFY_END")]
+    out = _L(unpack_returned_tuples=True).execute(m + "\nreturn minify")(code)
+    assert len(out.encode()) < 7600, "精簡後仍超過封包上限"
+    return out
+CODE = minified(CODE_RAW)
 
 
 class Done(Exception):

@@ -14,6 +14,28 @@ local DRONE_PROGRAMS = {
   ["B"] = "drone_task.lua",
 }
 
+-- 封包上限 8192 位元組，中文註解一個字 3 位元組，程式很容易超過：送出前先去掉註解和縮排
+-- MINIFY_BEGIN
+local function minify(src)
+  local out = {}
+  for line in (src .. "\n"):gmatch("(.-)\r?\n") do
+    local quote, cut, i = nil, nil, 1
+    while i <= #line do
+      local c = line:sub(i, i)
+      if quote then
+        if c == "\\" then i = i + 1 elseif c == quote then quote = nil end
+      elseif c == '"' or c == "'" then quote = c
+      elseif c == "-" and line:sub(i + 1, i + 1) == "-" then cut = i break end
+      i = i + 1
+    end
+    if cut then line = line:sub(1, cut - 1) end
+    line = line:gsub("^%s+", ""):gsub("%s+$", "")
+    if line ~= "" then out[#out + 1] = line end
+  end
+  return table.concat(out, "\n")
+end
+-- MINIFY_END
+
 -- ────────── 【硬體地址指定區】 ──────────
 local ASSIGNED_MODEM_ADDRESS  = "0456aae326c34ae5882179ef965ed130"
 
@@ -201,9 +223,14 @@ while true do
                 print(string.format("-> [通道 %s] 收到無人機請求！正在發送 %s...", active_tunnel_tag, program))
                 local f = io.open(program, "r")
                 if f then
-                    local code = f:read("*a")
+                    local code = minify(f:read("*a"))
                     f:close()
-                    current_tunnel.send("CODE_REPLY", code)
+                    if #code > 7600 then
+                        print(string.format("   ❌ %s 精簡後仍有 %d 位元組，超過封包上限 8192，請拆小程式", program, #code))
+                    else
+                        print(string.format("   (精簡後 %d 位元組)", #code))
+                        current_tunnel.send("CODE_REPLY", code)
+                    end
                 else
                     print(string.format("   ❌ 找不到檔案 %s (要和 server.lua 放在同一個目錄)", program))
                 end
