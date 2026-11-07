@@ -36,6 +36,19 @@ local function minify(src)
 end
 -- MINIFY_END
 
+-- 檔案下載的選項標籤 (請求端在 GET_FILE 的第三個參數用逗號分隔寫入，例如 "block,minify")：
+--   block  = 整塊傳送：依位元組切成大塊 (每塊 ≤ BLOCK_BYTES) 用 FILE_BLOCK 傳，而不是一行一則 FILE_LINE
+--   minify = 傳送前精簡 (去註解和縮排，只適合 Lua 程式)
+-- 沒寫標籤 = 照舊：逐行傳送、不精簡。
+local BLOCK_BYTES = 7000   -- 封包上限 8192，要扣掉標頭與其他參數
+
+local function parse_flags(v)
+  local flags = {}
+  if type(v) == "table" then v = table.concat(v, ",") end
+  for tag in tostring(v or ""):gmatch("[^,%s]+") do flags[tag:lower()] = true end
+  return flags
+end
+
 -- ────────── 【硬體地址指定區】 ──────────
 local ASSIGNED_MODEM_ADDRESS  = "0456aae326c34ae5882179ef965ed130"
 
@@ -115,7 +128,8 @@ print("  - 支援最大併發下載排隊隊列，")
 print("=============================================")
 
 -- 🌟 處理核心大檔案流式傳送與智慧握手（提取為獨立函數以利隊列排程）
-local function processFileTransfer(target_client, requested_filename)
+local function processFileTransfer(target_client, requested_filename, flags)
+    flags = flags or {}
     is_transferring = true
     
     local sanitized_input = requested_filename:gsub("^/", "")
@@ -135,12 +149,19 @@ local function processFileTransfer(target_client, requested_filename)
     end
 
     local lines = {}
+    local text
     local f = io.open(full_path, "r")
     if f then
-        for line in f:lines() do table.insert(lines, line) end
+        if flags.minify or flags.block then
+            text = f:read("*a")
+            if flags.minify then text = minify(text) end
+            if not flags.block then for line in text:gmatch("[^\n]+") do table.insert(lines, line) end end
+        else
+            for line in f:lines() do table.insert(lines, line) end
+        end
         f:close()
         
-        local total_lines = #lines
+        local total_lines = flags.block and select(2, text:gsub("\n", "")) + 1 or #lines
         print(string.format("\n[開啟傳輸] 目標客戶端: [%s...] | 檔案: %s (%d 行)", target_client:sub(1,6), sanitized_input, total_lines))
         
         -- 1. 發送起點通知，並附帶詢問 (考慮到無線網卡，對端要用 %s 接收)
@@ -165,7 +186,16 @@ local function processFileTransfer(target_client, requested_filename)
         end
         
         -- 2. 執行逐行發送與動態進度條渲染
-        if proceed_download then
+        if proceed_download and flags.block then
+            local total_blocks = math.max(1, math.ceil(#text / BLOCK_BYTES))
+            for i = 1, total_blocks do
+                modem.send(target_client, FILE_PORT, "FILE_BLOCK", i, total_blocks, text:sub((i - 1) * BLOCK_BYTES + 1, i * BLOCK_BYTES))
+                drawProgressBar(i, total_blocks)
+                os.sleep(0.05)
+            end
+            modem.send(target_client, FILE_PORT, "FILE_END")
+            print(string.format("✅ 檔案整塊發送完畢 (%d 位元組 / %d 塊)。", #text, total_blocks))
+        elseif proceed_download then
             for line_num, line_content in ipairs(lines) do
                 modem.send(target_client, FILE_PORT, "FILE_LINE", line_num, line_content)
                 if line_num % 10 == 0 or line_num == total_lines then
@@ -193,7 +223,7 @@ while true do
         local next_request = table.remove(download_queue, 1) -- 提取排在最前面的任務
         print(string.format("[隊列釋放] 正在為排隊中的客戶端 [%s...] 傳送檔案: %s", next_request.client:sub(1,6), next_request.file))
         -- 異步執行傳送
-        processFileTransfer(next_request.client, next_request.file)
+        processFileTransfer(next_request.client, next_request.file, next_request.flags)
     end
 
     -- 2. 正常的網卡訊號拉取 (設定 0.5 秒小超時，好讓迴圈能隨時回頭執行上面的「隊列調度器」)
@@ -278,8 +308,9 @@ while true do
                 
                 if requested_filename ~= "" then
                     -- 💡 【排隊防撞核心】：如果目前正在幫別台電腦發送大檔案，立刻把新請求塞進排隊名單！
+                    local flags = parse_flags(raw_event[8])
                     if is_transferring then
-                        table.insert(download_queue, { client = remoteAddr, file = requested_filename })
+                        table.insert(download_queue, { client = remoteAddr, file = requested_filename, flags = flags })
                         local current_position = #download_queue
                         print(string.format("伺服器正忙！客戶端 [%s...] 請求 '%s' 已排入，目前排在第 %d 位。", 
                             remoteAddr:sub(1,6), requested_filename, current_position))
@@ -288,7 +319,7 @@ while true do
                         modem.send(remoteAddr, FILE_PORT, "FILE_QUEUE", current_position)
                     else
                         -- 如果目前伺服器閒置，直接執行傳送
-                        processFileTransfer(remoteAddr, requested_filename)
+                        processFileTransfer(remoteAddr, requested_filename, flags)
                     end
                 end
             end
