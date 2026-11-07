@@ -16,23 +16,57 @@ local DRONE_PROGRAMS = {
 
 -- 封包上限 8192 位元組，中文註解一個字 3 位元組，程式很容易超過：送出前先去掉註解和縮排
 -- MINIFY_BEGIN
+-- 精簡 Lua 原始碼：去掉 -- 行註解、--[[ ]] 區塊註解、縮排與空行。
+-- 字串和長字串 [[ ]] 的內容原樣保留 (裡面的 -- 和縮排都不動)。
 local function minify(src)
-  local out = {}
-  for line in (src .. "\n"):gmatch("(.-)\r?\n") do
-    local quote, cut, i = nil, nil, 1
-    while i <= #line do
-      local c = line:sub(i, i)
-      if quote then
-        if c == "\\" then i = i + 1 elseif c == quote then quote = nil end
-      elseif c == '"' or c == "'" then quote = c
-      elseif c == "-" and line:sub(i + 1, i + 1) == "-" then cut = i break end
+  local lines, cur = {}, {}
+  local i, n = 1, #src
+  local function endline()
+    local line = table.concat(cur):gsub("%s+$", "")
+    if line ~= "" then lines[#lines + 1] = line end
+    cur = {}
+  end
+  while i <= n do
+    local c = src:sub(i, i)
+    local long = src:match("^%[(=*)%[", i)
+    if c == "-" and src:sub(i + 1, i + 1) == "-" then
+      local lvl = src:match("^%-%-%[(=*)%[", i)
+      if lvl then
+        local _, e = src:find("]" .. lvl .. "]", i, true)
+        i = (e or n) + 1
+        cur[#cur + 1] = " "                       -- 避免前後的字元黏在一起
+      else
+        local e = src:find("\n", i, true)
+        i = e or (n + 1)
+      end
+    elseif long then
+      local _, e = src:find("]" .. long .. "]", i, true)
+      e = e or n
+      cur[#cur + 1] = src:sub(i, e)
+      i = e + 1
+    elseif c == '"' or c == "'" then
+      local j = i + 1
+      while j <= n do
+        local d = src:sub(j, j)
+        if d == "\\" then j = j + 1 elseif d == c or d == "\n" then break end
+        j = j + 1
+      end
+      cur[#cur + 1] = src:sub(i, j)
+      i = j + 1
+    elseif c == "\n" then
+      endline()
+      i = i + 1
+    elseif c == "\r" then
+      i = i + 1
+    elseif (c == " " or c == "\t") and #cur == 0 then
+      i = i + 1                                   -- 行首縮排
+    else
+      cur[#cur + 1] = c
       i = i + 1
     end
-    if cut then line = line:sub(1, cut - 1) end
-    line = line:gsub("^%s+", ""):gsub("%s+$", "")
-    if line ~= "" then out[#out + 1] = line end
   end
-  return table.concat(out, "\n")
+  endline()
+  return table.concat(lines, "\n")
 end
 -- MINIFY_END
 
