@@ -6,7 +6,7 @@ local event = require("event")
 local modem = component.modem
 
 local SERVER_PORT = 100
-local TAG = "B"                          -- 與 T4server.lua 的 DRONE_GROUP_TAG 一致
+local TAG = "A"                          -- 與 T4server.lua 的 DRONE_GROUP_TAG 一致
 local OUT = "scan.txt"
 
 -- 掃描範圍 (世界方塊座標，含頭尾) 與取樣間隔。範圍外多留一圈平地，產生器才能校正高度

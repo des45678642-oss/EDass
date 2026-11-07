@@ -2,7 +2,7 @@
 local component = require("component")
 local event = require("event")
 local modem = component.modem
-local SERVER_PORT, TAG = 100, "B"
+local SERVER_PORT, TAG = 100, "A"
 modem.open(SERVER_PORT)
 modem.broadcast(SERVER_PORT, "SERVER_CMD", TAG, "probe")
 print("已送出 probe，請同時記下無人機『起點』的 F3 座標 (XYZ) 與朝向")

@@ -6,8 +6,13 @@ event.shouldInterrupt = function() return false end
 
 for a in require('component').list('relay') do require('component').invoke(a, 'setStrength', 16) end
 
--- 無人機開機時下載並執行的程式：平常用 drone_task.lua，要掃描地形時改成 scan_task.lua
-local DRONE_PROGRAM = "drone_task.lua"
+-- 無人機開機時下載並執行的程式，依「通道」分開指定：每個通道 (A、B、C...) 可以給不同程式。
+-- 沒列出的通道使用 DEFAULT_PROGRAM。例：A 通道的無人機掃描地形，B 通道的蓋東西。
+local DEFAULT_PROGRAM = "drone_task.lua"
+local DRONE_PROGRAMS = {
+  ["A"] = "scan_task.lua",
+  ["B"] = "drone_task.lua",
+}
 
 -- ────────── 【硬體地址指定區】 ──────────
 local ASSIGNED_MODEM_ADDRESS  = "0456aae326c34ae5882179ef965ed130"
@@ -192,12 +197,15 @@ while true do
         if active_tunnel_tag then
             local current_tunnel = tunnels[active_tunnel_tag]
             if cmd == "GET_CODE" then
-                print(string.format("-> [通道 %s] 收到無人機請求！正在發送 %s...", active_tunnel_tag, DRONE_PROGRAM))
-                local f = io.open(DRONE_PROGRAM, "r")
+                local program = DRONE_PROGRAMS[active_tunnel_tag] or DEFAULT_PROGRAM
+                print(string.format("-> [通道 %s] 收到無人機請求！正在發送 %s...", active_tunnel_tag, program))
+                local f = io.open(program, "r")
                 if f then
                     local code = f:read("*a")
                     f:close()
                     current_tunnel.send("CODE_REPLY", code)
+                else
+                    print(string.format("   ❌ 找不到檔案 %s (要和 server.lua 放在同一個目錄)", program))
                 end
             else
                 local drone_args = {}
