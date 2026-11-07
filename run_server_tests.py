@@ -128,10 +128,18 @@ def t_not_minified_by_default_block():
     assert "-- 註解" in [s for s in sent if s[2] == "FILE_BLOCK"][0][5]
 
 
+def t_block_line_count():
+    # FILE_START 的行數要和客戶端 f:lines() 數的一致 (結尾有無換行都一樣)
+    for data, n in (("a\nb\n", 2), ("a\nb", 2), ("a\n\nb\n", 3), ("x", 1)):
+        sent = run({"a.txt": data}, [("a.txt", "block")])
+        assert sent[0][2] == "FILE_START" and sent[0][4] == n, (data, sent[0])
+
+
 test("預設：逐行、不精簡 (與舊行為相同)", t_default_lines)
 test("block：小檔一塊傳完，內容原樣", t_block_single)
 test("block：大檔依位元組切塊，每塊 ≤ 7000，合併後相同", t_block_multi)
 test("minify：只在有標籤時精簡 (字串裡的 -- 保留)", t_minify)
 test("只寫 block 不會精簡", t_not_minified_by_default_block)
+test("block：FILE_START 的行數與 f:lines() 一致", t_block_line_count)
 print(f"\n{sum(results)} passed, {len(results) - sum(results)} failed")
 sys.exit(0 if all(results) else 1)

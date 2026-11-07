@@ -161,7 +161,12 @@ local function processFileTransfer(target_client, requested_filename, flags)
         end
         f:close()
         
-        local total_lines = flags.block and select(2, text:gsub("\n", "")) + 1 or #lines
+        -- 區塊模式的「行數」要和客戶端 f:lines() 數出來的一致 (快取比對用)：換行數，結尾沒換行就再 +1
+        local total_lines = #lines
+        if flags.block then
+            total_lines = select(2, text:gsub("\n", ""))
+            if #text > 0 and text:sub(-1) ~= "\n" then total_lines = total_lines + 1 end
+        end
         print(string.format("\n[開啟傳輸] 目標客戶端: [%s...] | 檔案: %s (%d 行)", target_client:sub(1,6), sanitized_input, total_lines))
         
         -- 1. 發送起點通知，並附帶詢問 (考慮到無線網卡，對端要用 %s 接收)
