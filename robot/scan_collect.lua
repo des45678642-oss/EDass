@@ -52,8 +52,7 @@ while true do
       rows = rows + 1
       io.write(string.format("\r已收 %d 列 (Z=%d)   ", rows, z))
     elseif kind == "CALIB" then
-      print(string.format("導航校正：世界 +X -> 導航 (%.1f, %.1f)，世界 +Z -> 導航 (%.1f, %.1f)，導航範圍 ±%d",
-        raw[10], raw[11], raw[12], raw[13], raw[14]))
+      print("導航校正：" .. tostring(raw[10]))
     elseif kind == "SCAN_DONE" then
       print("\n掃描完成，共 " .. rows .. " 列，已存成 " .. OUT)
       break

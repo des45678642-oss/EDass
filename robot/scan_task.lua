@@ -149,7 +149,9 @@ local function scan(x0, x1, z0, z1, step)
   local _, y0 = pos()
   if y0 < APPROACH_Y then go(0, APPROACH_Y - y0, 0) end   -- 先升到高空，避免長距離直線飛行撞到地形
   local ax, az, bx, bz = calibrate()
-  report("CALIB", ax, az, bx, bz, check_range(x0, x1, z0, z1))
+  local range = check_range(x0, x1, z0, z1)
+  -- 封包最多 8 個部分 (中繼轉發時還會再加一個通道標籤)，所以校正結果合成一個字串傳
+  report("CALIB", string.format("世界+X->導航(%.1f,%.1f) 世界+Z->導航(%.1f,%.1f) 導航範圍±%d", ax, az, bx, bz, range))
   local dir = 1
   local xlast = x0 + math.floor((x1 - x0) / step) * step
   for z = z0, z1, step do

@@ -137,6 +137,8 @@ class Sim:
         return self.report(a)
 
     def report(self, args):
+        # OC 預設 maxNetworkPacketParts=8；中繼轉發給 T4 時會多加一個通道標籤
+        assert len(args) + 1 <= 8, f'packet has too many parts: {len(args) + 1} {list(args)[:4]}'
         self.reports.append(list(args))
 
     def run(self, x, z, dp, sY):
