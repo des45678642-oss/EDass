@@ -20,7 +20,7 @@ class Done(Exception):
 
 
 class Sim:
-    def __init__(self, solid=(), start=(-200.5, 76.0, -49.5), camera=True):
+    def __init__(self, solid=(), start=(-200.5, 76.0, -49.5), camera=True, nav=None, nav_range=1e9, energy=None):
         self.solid = set(solid)
         for x in range(-260, -140):          # 基岩 y=74
             for z in range(-110, 10):
@@ -32,7 +32,12 @@ class Sim:
         self.placed = []
         self.collisions = 0
         self.camera = camera
+        self.nav = nav or (lambda p: (p[0], p[1], p[2]))     # 世界座標 -> 導航升級回傳值
+        self.nav_range = nav_range
         self.ticks = 0
+        self.max_energy = energy or 1e12   # 能量模型：移動每格 3 點、傳訊息 100 點、每 tick(0.05s) 補 0.5 點
+        self.energy = self.max_energy
+        self.dead = False
 
     def is_solid(self, x, y, z):
         return (math.floor(x), math.floor(y), math.floor(z)) in self.solid
@@ -57,6 +62,10 @@ class Sim:
             self.p = q
             moved += delta * delta
         self.vel = math.sqrt(moved) * 20
+        self.energy = min(self.max_energy, self.energy - 3 * math.sqrt(moved) + 0.5)
+        if self.energy < 0:
+            self.dead = True
+            raise Done("沒電")
 
     def ray(self, d):
         length = math.sqrt(sum(c * c for c in d))
@@ -83,8 +92,8 @@ class Sim:
             "select": lambda s: None,
             "place": lambda side: sim.place(),
         })
-        nav = lua.table_from({"getPosition": lambda: (sim.p[0], sim.p[1], sim.p[2])})
-        tunnel = lua.table_from({"send": lambda *a: sim.report(a)})
+        nav = lua.table_from({"getPosition": lambda: sim.nav(sim.p), "getRange": lambda: sim.nav_range})
+        tunnel = lua.table_from({"send": lambda *a: sim.send(a)})
         cam = lua.table_from({
             "distance": lambda x=0, y=0: sim.ray((-x, y, 1)),
             "distanceUp": lambda x=0, y=0: sim.ray((x, 1, y)),
@@ -112,13 +121,20 @@ class Sim:
                 raise Done("idle")
             return sim.queue.pop(0)
 
-        g.computer = lua.table_from({"pullSignal": pull})
+        g.computer = lua.table_from({"pullSignal": pull, "energy": lambda: sim.energy, "maxEnergy": lambda: sim.max_energy})
 
     def place(self):
         x, y, z = (math.floor(c) for c in self.p)
         self.solid.add((x, y - 1, z))
         self.placed.append(y - 1)
         return True
+
+    def send(self, a):
+        self.energy -= 100
+        if self.energy < 0:
+            self.dead = True
+            raise Done("沒電")
+        return self.report(a)
 
     def report(self, args):
         self.reports.append(list(args))

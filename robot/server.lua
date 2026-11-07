@@ -6,6 +6,9 @@ event.shouldInterrupt = function() return false end
 
 for a in require('component').list('relay') do require('component').invoke(a, 'setStrength', 16) end
 
+-- 無人機開機時下載並執行的程式：平常用 drone_task.lua，要掃描地形時改成 scan_task.lua
+local DRONE_PROGRAM = "drone_task.lua"
+
 -- ────────── 【硬體地址指定區】 ──────────
 local ASSIGNED_MODEM_ADDRESS  = "0456aae326c34ae5882179ef965ed130"
 
@@ -189,8 +192,8 @@ while true do
         if active_tunnel_tag then
             local current_tunnel = tunnels[active_tunnel_tag]
             if cmd == "GET_CODE" then
-                print(string.format("-> [通道 %s] 收到無人機請求！正在發送 drone_task.lua...", active_tunnel_tag))
-                local f = io.open("drone_task.lua", "r")
+                print(string.format("-> [通道 %s] 收到無人機請求！正在發送 %s...", active_tunnel_tag, DRONE_PROGRAM))
+                local f = io.open(DRONE_PROGRAM, "r")
                 if f then
                     local code = f:read("*a")
                     f:close()
