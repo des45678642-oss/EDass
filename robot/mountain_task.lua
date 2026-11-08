@@ -212,9 +212,12 @@ local function build_column(x, z, h, mats, cruise)
     local ok, off = yok(wx, wz, layer)
     if not ok then return false, "pos@" .. layer .. off end
     local _, what = d.detect(0)
-    if what == "solid" then                      -- 剛到位偵測可能看到的是還沒更新位置時的別格 (或鄰格)：說「已有方塊」要等一下再確認一次才信
-      computer.pullSignal(WAIT)
-      _, what = d.detect(0)
+    if what == "solid" then                      -- detect 說「已有方塊」不能直接信 (等多久都可能誤判)：
+      local _, y0 = pos()                        -- 實際往下探 0.9 格：真的有方塊會被擋在表面 (只能下去約 0.5)，空的就下得去
+      go(0, -0.9, 0)
+      local _, y1 = pos()
+      go(0, y0 - y1, 0)                          -- 回到原本的高度
+      if y0 - y1 > 0.7 then what = "air" end
     end
     if what ~= "solid" then                      -- 腳下那格還是空的才放
       local ok, why, slot = false, nil, nil
@@ -237,9 +240,8 @@ local function build_column(x, z, h, mats, cruise)
       end
       if not ok then                             -- 失敗原因附上現場狀態，方便從失敗紀錄判斷
         local cx, cy2, cz = pos()
-        local _, det = d.detect(0)
-        return false, string.format("place@%d(%s%d %s y%+.2f x%+.2f z%+.2f %s)", layer, seq[layer], d.count(slot),
-          det, cy2 - BASE - layer - HOVER, cx - wx, cz - wz, why)
+        return false, string.format("place@%d(%s%d y%+.2f x%+.2f z%+.2f %s)", layer, seq[layer], d.count(slot),
+          cy2 - BASE - layer - HOVER, cx - wx, cz - wz, why)
       end
     end
   end
