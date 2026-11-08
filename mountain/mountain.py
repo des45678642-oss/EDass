@@ -475,7 +475,7 @@ def preview(disp, cv, water, bite, bridges, canyon, z_limit, path, excludes=(), 
 MAT_COLORS = {"S": "#8a8a8a", "T": "#4b5563", "C": "#b4b0a6", "G": "#d2b48c", "N": "#ffffff", "D": "#7a5230"}
 
 
-def preview_materials(top_mat, groups, cv, water, path):
+def preview_materials(top_mat, groups, cv, water, path, tags="ABC"):
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
@@ -493,7 +493,7 @@ def preview_materials(top_mat, groups, cv, water, path):
         if pts:
             mid = sorted(pts, key=lambda p: math.atan2(cv.zm(p[0]) - 208, cv.xm(p[1]) - 208))[len(pts) // 2]
             wx, wz = m2w(cv.xm(mid[1]), cv.zm(mid[0]))
-            ax.text(wx, wz, "ABC"[g], color="r", fontsize=22, ha="center", va="center", alpha=0.8)
+            ax.text(wx, wz, tags[g], color="r", fontsize=22, ha="center", va="center", alpha=0.8)
     ax.legend([plt.Rectangle((0, 0), 1, 1, fc=MAT_COLORS[k]) for k in keys], [MATERIALS[k] for k in keys], loc="upper right")
     ax.set_title("表面材質（紅字 = 負責的無人機）")
     ax.set_aspect("equal")
@@ -553,6 +553,7 @@ def main():
     ap.add_argument("--shell", type=int, default=2, help="殼厚 (層)；0 = 全實心。至少 2，砂礫下才一定有實心層墊著")
     ap.add_argument("--interior", choices=list("SC"), default="S", help="殼裡看不到的部分用石頭(S)還是鵝卵石(C)")
     ap.add_argument("--drones", type=int, default=3)
+    ap.add_argument("--tags", default=None, help="每台無人機的通道標籤，例如 AC (預設 ABC 的前 N 個)；檔名 mountain_cols_<標籤>.txt")
     ap.add_argument("--table", action="store_true", help="只印各種高度/山寬的工程量比較")
     ap.add_argument("--out", default=".")
     a = ap.parse_args()
@@ -573,6 +574,8 @@ def main():
     out = pathlib.Path(a.out)
     out.mkdir(parents=True, exist_ok=True)
     h.tofile(out / "mountain_map.bin")
+    tags = a.tags or "ABC"[:a.drones]
+    assert len(tags) >= a.drones, "--tags 的標籤數要不少於 --drones"
     start0 = shell_start(h, a.shell)
     pts_all = [(int(z), int(x)) for z, x in zip(*np.nonzero(h))]
     groups = split_for_drones(h, cv, {p: "" for p in pts_all}, a.drones, start0)
@@ -593,7 +596,7 @@ def main():
     blocks = int((h.astype(np.int64)[h > 0] - start[h > 0] + 1).sum())
     files = []
     for g, pts in enumerate(groups):
-        name = f"mountain_cols_{'ABC'[g]}.txt"
+        name = f"mountain_cols_{tags[g]}.txt"
         with open(out / name, "w", encoding="utf-8") as f:
             for (cz, cx) in pts:
                 f.write(f"{cv.xm(cx)} {cv.zm(cz)} {int(h[cz, cx])} {cols[(cz, cx)]}\n")
@@ -605,7 +608,7 @@ def main():
                 drones=[dict(file=n, columns=c, blocks=b) for n, c, b in files])
     (out / "mountain_meta.json").write_text(json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8")
     preview(info["display"], cv, water, bite, a.bridge, canyon, a.z_limit, out / "mountain_preview.png", a.exclude, info["existing"])
-    preview_materials(top_mat, groups, cv, water, out / "mountain_materials.png")
+    preview_materials(top_mat, groups, cv, water, out / "mountain_materials.png", tags)
 
     print(f"畫布 {cv.nx}×{cv.nz}（左右外擴 {cv.ox}、南側外擴 {cv.oz}）| 欄數 {cols_n:,}")
     print(f"實心 {solid_blocks:,} 方塊 → 殼厚 {a.shell}：{blocks:,} 方塊（湖的 {blocks / LAKE_BLOCKS:.1f}×，省 {100 * (1 - blocks / solid_blocks):.0f}%）")

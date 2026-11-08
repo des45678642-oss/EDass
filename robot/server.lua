@@ -7,11 +7,12 @@ event.shouldInterrupt = function() return false end
 for a in require('component').list('relay') do require('component').invoke(a, 'setStrength', 16) end
 
 -- 無人機開機時下載並執行的程式，依「通道」分開指定：每個通道 (A、B、C...) 可以給不同程式。
--- 沒列出的通道使用 DEFAULT_PROGRAM。例：A 通道的無人機掃描地形，B 通道的蓋東西。
+-- 沒列出的通道使用 DEFAULT_PROGRAM。例：A、C 通道蓋山，B 通道掃描地形。
 local DEFAULT_PROGRAM = "drone_task.lua"
 local DRONE_PROGRAMS = {
-  ["A"] = "scan_task.lua",
-  ["B"] = "drone_task.lua",
+  ["A"] = "mountain_task.lua",   -- 蓋山 (建築無人機)
+  ["B"] = "scan_task.lua",       -- 掃描機
+  ["C"] = "mountain_task.lua",   -- 蓋山 (建築無人機)
 }
 
 -- 封包上限 8192 位元組，中文註解一個字 3 位元組，程式很容易超過：送出前先去掉註解和縮排
@@ -89,6 +90,7 @@ local ASSIGNED_MODEM_ADDRESS  = "0456aae326c34ae5882179ef965ed130"
 local TUNNEL_POOL = {
   ["A"] = "28ce",
   ["B"] = "b9f7",
+  -- ["C"] = "填入第三張連接卡位址的開頭幾碼 (和上面一樣的寫法)",
 }
 -- ────────────────────────────────────────
 
