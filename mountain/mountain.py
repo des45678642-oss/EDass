@@ -337,7 +337,81 @@ def assign_materials(h, seed=11, interior="S", shell=0, start=None):
     return cols, totals, top_mat, start
 
 
-def plan_support(h, start, pts, center=(208, 208), cv=None, band=24):
+def order_bands(ok, fill, h, band=24, tile=6):
+    """施工順序：由低到高分帶 (每帶 band 層)；同一帶再切成 tile×tile 的小塊，小塊之間用蛇形列序，
+    每一塊「從最低的地方開始」(殼起點最低、接得上的欄)，再往相鄰、較高的欄一路蓋上去。
+    還沒有接點的欄先跳過，等相鄰的塊蓋好再回來。tile=0 時退回整帶的蛇形列序。
+    fill、h 是 {(a, b): 值}；回傳 (順序, 接不上的欄)。(逐層嚴格由低到高路徑太長，所以折衷成分帶 + 小塊。)"""
+    import heapq
+    bands = {}
+    for p in ok:
+        bands.setdefault((fill[p] - 1) // band, []).append(p)
+    built, order, bad = set(), [], []
+
+    def can(p):
+        if fill[p] <= 1:
+            return True
+        for dz, dx in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+            n = (p[0] + dz, p[1] + dx)
+            if n in built and fill[n] <= fill[p] <= h[n]:
+                return True
+        return False
+
+    def raster(p):
+        return (p[0], p[1] if p[0] % 2 == 0 else -p[1])
+
+    for b in sorted(bands):
+        left = []
+        if tile:
+            groups = {}
+            for p in bands[b]:
+                groups.setdefault((p[0] // tile, p[1] // tile), []).append(p)
+            for k in sorted(groups, key=lambda k: (k[0], k[1] if k[0] % 2 == 0 else -k[1])):
+                pending = set(groups[k])
+                by_raster = sorted(groups[k], key=raster)
+                cnt = 0
+                while pending:
+                    seed = None                       # 這一塊裡接得上的欄中最低的
+                    for p in by_raster:
+                        if p in pending and can(p) and (seed is None or fill[p] < fill[seed]):
+                            seed = p
+                    if seed is None:
+                        break
+                    pq, queued = [(fill[seed], cnt, seed)], {seed}
+                    cnt += 1
+                    while pq:
+                        _, _, p = heapq.heappop(pq)
+                        if p not in pending or not can(p):
+                            continue
+                        pending.discard(p)
+                        built.add(p)
+                        order.append(p)
+                        for dz, dx in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+                            n = (p[0] + dz, p[1] + dx)
+                            if n in pending and n not in queued:
+                                queued.add(n)
+                                heapq.heappush(pq, (fill[n], cnt, n))
+                                cnt += 1
+                left.extend(pending)
+        else:
+            left = list(bands[b])
+        todo = sorted(left, key=raster)
+        while todo:
+            nxt = []
+            for p in todo:
+                if can(p):
+                    built.add(p)
+                    order.append(p)
+                else:
+                    nxt.append(p)
+            if len(nxt) == len(todo):                # 這一帶剩下的都接不上：留給「無法支撐」
+                bad.extend(nxt)
+                break
+            todo = nxt
+    return order, bad
+
+
+def plan_support(h, start, pts, center=(208, 208), cv=None, band=24, tile=6):
     """決定一台無人機的「殼起點」與施工順序，保證每一欄的第一塊都放得上去。
 
     OC 的放置規則：目標格的鄰格 (腳下、四個側邊) 有方塊就放得上去。一欄的殼是 start..h 一路蓋到頂，
@@ -377,36 +451,8 @@ def plan_support(h, start, pts, center=(208, 208), cv=None, band=24):
             return math.atan2(cv.zm(p[0]) - center[0], cv.xm(p[1]) - center[1])
         return math.atan2(p[0] - center[0], p[1] - center[1])
 
-    # 由低到高分帶 (每帶 BAND 層) 蓋；同一帶內用蛇形列序掃描，還沒有接點的欄先跳過、下一輪再回來。
-    # (逐層嚴格由低到高路徑太長；整座山一輪掃完又要掃好幾百輪，所以折衷成分帶。)
-    bands = {}
-    for p in ok:
-        bands.setdefault((fill[p] - 1) // band, []).append(p)
-    built, order = set(), []
-
-    def can(p):
-        if fill[p] <= 1:
-            return True
-        for dz, dx in ((1, 0), (-1, 0), (0, 1), (0, -1)):
-            n = (p[0] + dz, p[1] + dx)
-            if n in built and fill[n] <= fill[p] <= h[n]:
-                return True
-        return False
-
-    for b in sorted(bands):
-        todo = sorted(bands[b], key=lambda p: (p[0], p[1] if p[0] % 2 == 0 else -p[1]))
-        while todo:
-            nxt = []
-            for p in todo:
-                if can(p):
-                    built.add(p)
-                    order.append(p)
-                else:
-                    nxt.append(p)
-            if len(nxt) == len(todo):            # 這一帶剩下的都接不上：留給「無法支撐」
-                bad.extend(nxt)
-                break
-            todo = nxt
+    order, bad2 = order_bands(ok, fill, h, band, tile)
+    bad.extend(bad2)
     new_start = {p: fill[p] for p in order}
     return new_start, order, bad
 
