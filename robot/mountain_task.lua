@@ -34,6 +34,7 @@ local WX0, WZ0, BASE = -200.5, -49.5, 82
 local MAXUP, LEG = 12, 30
 local HOVER = 0.5             -- 放置時停在整數高度上方這麼多 (實測位置只會停在 0.25 的倍數，且有 ±0.005 的雜訊；+0.25~+0.75 都放得到目標層，0.5 離上下邊界最遠：
                            -- 停在剛好整數高度，約一半機率 floor 掉到下一層，方塊就放錯層)
+local WAIT = 0.3             -- 每次放置前固定等這麼久 (秒)；0.2 偶爾不夠、想更穩就加大
 local HOP = 10                 -- 水平距離不超過這個就低空平移，超過就升到巡航高度
 local LOW_FRAC, RESUME_FRAC = 0.10, 0.30   -- 電量保險：低於 10% 懸停等充電，充到 30% 再動
 
@@ -173,13 +174,6 @@ local function travel(wx, wz, ty, cruise)
 end
 
 -- 對準欄位正中心：放置的射線只比目標格多伸進鄰格 0.15 格，偏離超過這個就會打空
-local function settle()                    -- 等無人機停穩 (到位 != 停穩，還在飄的時候射線會偏)；最多等 2 秒
-  for _ = 1, 40 do
-    if d.getVelocity() < 0.02 then return end
-    computer.pullSignal(0.05)
-  end
-end
-
 local function align(wx, wz, wy)
   local cx, cy, cz = pos()
   local dx, dy, dz = wx - cx, (wy or cy) - cy, wz - cz
@@ -195,7 +189,6 @@ local function yok(wx, wz, layer)
     local cx, cy, cz = pos()
     local dy = cy - BASE - layer
     if dy >= 0.3 and dy <= 0.6 and math.abs(cx - wx) < 0.13 and math.abs(cz - wz) < 0.13 then
-      settle()                                   -- 位置對了還在飄就等一下 (已經停穩會馬上回來)
       return true
     end
     align(wx, wz, BASE + layer + HOVER)
@@ -221,9 +214,10 @@ local function build_column(x, z, h, mats, cruise)
     local _, what = d.detect(0)
     if what ~= "solid" then                      -- 腳下那格還是空的才放
       local ok, why, slot = false, nil, nil
-      for try = 1, 4 do
+      for try = 1, 3 do                          -- 第一次 + 重試 2 次
         slot = stock(seq[layer])
         d.select(slot)                           -- 每次都重新選：補燃料 / 補貨可能換掉了選取的槽
+        computer.pullSignal(WAIT)                -- 到位後固定等一下再放 (實測：剛到位就放必定失敗，等過就放得上去)
         ok, why = d.place(0)
         if ok then
           local _, w = d.detect(0)               -- place 找不到目標會改放四周：確認腳下真的有方塊才算成功
@@ -235,8 +229,7 @@ local function build_column(x, z, h, mats, cruise)
           if w == "solid" then break end
           ok, why = false, "side"
         end
-        computer.pullSignal(0.2)                 -- 失敗才多等一下：等停穩再重新對準
-        yok(wx, wz, layer)
+        yok(wx, wz, layer)                       -- 失敗：重新對準 (下一輪開頭會再固定等一下)
       end
       if not ok then                             -- 失敗原因附上現場狀態，方便從失敗紀錄判斷
         local cx, cy2, cz = pos()
