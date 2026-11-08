@@ -200,7 +200,8 @@ local function yok(wx, wz, layer)
     end
     align(wx, wz, BASE + layer + HOVER)
   end
-  return false
+  local cx, cy, cz = pos()
+  return false, string.format("(%+.2f,%+.2f,%+.2f)", cx - wx, cy - BASE - layer, cz - wz)   -- 回報最後一次的偏差 (x, 高度, z)
 end
 
 -- 蓋一欄 (可重複執行：已經蓋好的層會跳過，所以失敗重試、續蓋、補蓋都安全)
@@ -215,7 +216,8 @@ local function build_column(x, z, h, mats, cruise)
   _, cy = pos()
   if cy > BASE + h + 1.5 then return false, "descend" end   -- 沒降下來 (不是被這欄已蓋的方塊擋住)：不能當成已蓋好
   for layer = math.max(s, math.ceil(cy - BASE - HOVER - 0.05)), h do
-    if not yok(wx, wz, layer) then return false, "pos@" .. layer end
+    local ok, off = yok(wx, wz, layer)
+    if not ok then return false, "pos@" .. layer .. off end
     local _, what = d.detect(0)
     if what ~= "solid" then                      -- 腳下那格還是空的才放
       local ok, why, slot = false, nil, nil
