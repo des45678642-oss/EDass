@@ -44,6 +44,7 @@ class MSim(Sim):
         self.store_calls = 0
         self.place_fail = 0
         self.lagticks = 5
+        self.stall = 0.0
         self.lagdetect = False            # 剛移動完 5 tick 內 detect 會誤報 solid (實體位置還沒到位)
         self.last_move = -99
         self._lastp = None
@@ -113,6 +114,8 @@ class MSim(Sim):
         g = lua.globals()
 
         def drone_move(dx, dy, dz):
+            if sim.stall and dy < -5:                  # 長距離下降最後停在目標上方一點 (減速收尾、速度太小被當成到位)
+                dy += sim.stall
             sim.target[0] += dx; sim.target[1] += dy; sim.target[2] += dz
 
         def select(s):
@@ -426,6 +429,16 @@ def t_detect_lag():
     assert failed == 0 and sim.blocks == expect, (failed, len(sim.blocks), len(expect))
 
 
+def t_descent_stalls_above():
+    # 長距離下降停在目標上方 0.2 格：不能因此把殼起點那一層默默跳過 (以前會從下一層開始、整欄少一塊)
+    lines, expect, h = small_mountain()
+    sim = make_sim()
+    sim.stall = 0.2
+    sim.run([";".join(lines)], cruise=int(81 + h.max() + 4))
+    done, failed, rep = done_counts(sim)
+    assert failed == 0 and sim.blocks == expect, (failed, len(sim.blocks), len(expect))
+
+
 def t_gravel_fall():
     # 砂礫靠側邊方塊放得上去、但腳下是空的：2 tick 後會掉。要等一下確認，回報 fall，不重複亂放
     sim = make_sim()
@@ -541,6 +554,7 @@ test("放到旁邊不算成功：腳下沒方塊就回報失敗", t_stray_not_su
 test("放置範圍測試程式：量出各偏移方向的最大成功偏移", t_place_probe)
 test("降不下去：回報 descend，不默默當成已蓋好", t_descend_blocked_not_silent)
 test("detect 一直誤報 solid：往下探確認，不默默跳過", t_detect_lag)
+test("下降停在目標上方一點：第一層不會被跳過", t_descent_stalls_above)
 test("砂礫腳下沒撐住：回報 fall，不重複亂放", t_gravel_fall)
 test("高度雜訊 ±0.004：不會放錯層", t_height_noise)
 test("資料庫由程式自己寫入：每種材料只寫一次", t_db_auto_setup)

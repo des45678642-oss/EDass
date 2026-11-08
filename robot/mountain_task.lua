@@ -105,7 +105,7 @@ local function setup_entry(m)
   if ready[m] then return end
   db.clear(ENTRY[m])
   me.store(ITEM[m], db.address, ENTRY[m], 1)
-  if not db.get(ENTRY[m]) then error("ME 網路裡找不到 " .. ITEM[m].name .. " (損傷值 " .. ITEM[m].damage .. ")") end
+  if not db.get(ENTRY[m]) then error("ME 找不到 " .. ITEM[m].name .. ":" .. ITEM[m].damage) end
   ready[m] = true
 end
 
@@ -119,7 +119,7 @@ local function free_slot()                 -- 選一個空槽 (沒有就挑最�
   end
   d.select(pick)
   if d.count(pick) > 0 then me.sendItems() end
-  if d.count(pick) > 0 then error("ME 收不回槽 " .. pick .. " 的舊材料 (ME 滿了？)") end
+  if d.count(pick) > 0 then error("ME 收不回槽 " .. pick) end
   slot_m[pick] = nil
   return pick
 end
@@ -132,7 +132,7 @@ local function stock(m)
   local pick = free_slot()
   setup_entry(m)
   local got = me.requestItems(db.address, ENTRY[m], 64)
-  if not got or got < 1 or d.count(pick) < 1 then error("ME 供不出材料 " .. m .. " (資料庫項目 " .. ENTRY[m] .. ")") end
+  if not got or got < 1 or d.count(pick) < 1 then error("ME 供不出 " .. m) end
   slot_m[pick], slot_t[pick] = m, clock
   return pick
 end
@@ -144,7 +144,7 @@ ensure_fuel = function()
   local pick = free_slot()
   setup_entry("F")
   local got = me.requestItems(db.address, ENTRY.F, 64)
-  if not got or got < 1 then error("ME 供不出燃料 " .. ITEM.F.name) end
+  if not got or got < 1 then error("ME 供不出燃料") end
   g.insert()
   if d.count(pick) > 0 then me.sendItems() end   -- 發電升級插不下的還給 ME
 end
@@ -205,10 +205,16 @@ local function build_column(x, z, h, mats, cruise)
   align(wx, wz)
   -- 往下走到殼起點；途中被已經蓋好的方塊擋住就停在它上面，從那一層接著看 (續蓋、補蓋都靠這個)
   local _, cy = pos()
-  go(0, BASE + s + HOVER - cy, 0)
+  local tgt = BASE + s + HOVER
+  go(0, tgt - cy, 0)
   _, cy = pos()
-  if cy > BASE + h + 1.5 then return false, "descend" end   -- 沒降下來 (不是被這欄已蓋的方塊擋住)：不能當成已蓋好
-  for layer = math.max(s, math.ceil(cy - BASE - HOVER - 0.05)), h do
+  local k = s                                  -- 降到(接近)殼起點：從 s 層開始。差一點點不能算「被擋住」，否則第 s 層會被默默跳過
+  if cy > tgt + 0.35 then                      -- 明顯停在更高的地方：只有「停在這欄自己已蓋好的方塊頂上」才合理，從那一層接著看
+    local _, w = d.detect(0)
+    if cy > BASE + h + 0.8 or w ~= "solid" then return false, "descend" end
+    k = math.ceil(cy - BASE - HOVER - 0.05)
+  end
+  for layer = k, h do
     local ok, off = yok(wx, wz, layer)
     if not ok then return false, "pos@" .. layer .. off end
     local _, what = d.detect(0)
