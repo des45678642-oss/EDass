@@ -75,6 +75,11 @@ class MSim(Sim):
         self.slots[self.sel][1] -= 1
         return True
 
+    def detect(self, side):
+        dv = {0: (0, -1, 0), 1: (0, 1, 0), 2: (0, 0, -1), 3: (0, 0, 1), 4: (-1, 0, 0), 5: (1, 0, 0)}[side]
+        c = (math.floor(self.p[0]) + dv[0], math.floor(self.p[1]) + dv[1], math.floor(self.p[2]) + dv[2])
+        return (True, "solid") if c in self.solid else (False, "air")
+
     def install(self, lua):
         sim = self
         g = lua.globals()
@@ -133,8 +138,7 @@ class MSim(Sim):
                 "getOffset": lambda: math.dist(sim.target, sim.p), "getVelocity": lambda: sim.vel,
                 "select": select, "count": lambda s=None: sim.slots[int(s or sim.sel)][1],
                 "place": lambda side=0: sim.mplace(),
-                "detect": lambda side=0: ((True, "solid") if (math.floor(sim.p[0]), math.floor(sim.p[1]) - 1,
-                                                              math.floor(sim.p[2])) in sim.solid else (False, "air")),
+                "detect": lambda side=0: sim.detect(int(side)),
             }),
             "navigation": lua.table_from({"getPosition": lambda: tuple(sim.p), "getRange": lambda: 1e9}),
             "tunnel": lua.table_from({"send": lambda *a: sim.send(a)}),
@@ -166,6 +170,17 @@ class MSim(Sim):
             return sim.queue.pop(0)
 
         g.computer = lua.table_from({"pullSignal": pull, "energy": lambda: sim.energy, "maxEnergy": lambda: sim.max_energy})
+
+    def run_probe(self, code, *args):
+        lua = LuaRuntime(unpack_returned_tuples=True)
+        self.install(lua)
+        self.queue.append(("modem_message", "l", "r", 0, 0, "DRONE_CMD", "probe_place") + args)
+        try:
+            lua.eval("function(code) return load(code) end")(code)()
+        except Exception as e:
+            if "idle" not in str(e):
+                raise
+        return self
 
     def run(self, batches, cruise):
         lua = LuaRuntime(unpack_returned_tuples=True)
@@ -333,6 +348,29 @@ def t_stray_not_success():
     assert all(v for v in [rep[0][6]]) and "side" in rep[0][6] or failed > 8, rep[0][6]
 
 
+def t_place_probe():
+    code = ns["minified"]((ROOT / "robot" / "place_probe.lua").read_text(encoding="utf-8"))
+    solid = {(x, y, z) for x in range(-5, 40) for z in range(-140, -80) for y in range(74, 82)}
+    sim = MSim(solid, (4.5, 90.0, -109.5))
+    sim.slots[1] = ["minecraft:stone", 64]
+    sim.slots[2] = ["minecraft:stone", 64]
+    sim.run_probe(code, 81)
+    txt = "\n".join(str(r[3]) for r in sim.reports if r[2] == "PROBE")
+    assert "ERROR" not in txt and any(r[2] == "PROBE_DONE" for r in sim.reports), txt
+    rows = {}
+    cur = None
+    for line in txt.splitlines():
+        if line.split(" ")[0] in ("away", "toward", "perp", "diag"):
+            cur = line.split(" ")[0]
+        elif cur and line[:1].isdigit():
+            rows.setdefault(cur, []).append((float(line.split()[0]), "T=1" in line))
+    # 模擬器的規則：遠離支撐 0.15 以內放得上去，超過放不上去；靠近支撐一律放得上去
+    a = dict(rows["away"])                                    # 0.15 剛好在邊界上 (浮點誤差)，不驗證
+    assert a[0.0] and a[0.1] and not a[0.2] and not a[0.3] and not a[0.45], a
+    assert all(v for _, v in rows["toward"]), rows["toward"]
+    assert "總結" in txt, txt[-300:]
+
+
 def t_db_auto_setup():
     lines, expect, h = small_mountain()
     sim = make_sim()
@@ -433,6 +471,7 @@ test("ME 供不出材料：回報 ERROR 並中止，不假裝完成", t_me_empty
 test("無法抵達的欄：記錄失敗，其餘繼續", t_blocked_column)
 test("盆地高原：亂序放不上去，規劃過的順序全部放得上去", t_basin_needs_plan)
 test("放到旁邊不算成功：腳下沒方塊就回報失敗", t_stray_not_success)
+test("放置範圍測試程式：量出各偏移方向的最大成功偏移", t_place_probe)
 test("資料庫由程式自己寫入：每種材料只寫一次", t_db_auto_setup)
 test("ME 網路沒有某材料：回報 ERROR 並指出材料名稱", t_missing_material)
 test("沒裝攝影機：照樣蓋得出來", t_no_camera)
