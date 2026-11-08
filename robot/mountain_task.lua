@@ -34,7 +34,6 @@ local WX0, WZ0, BASE = -200.5, -49.5, 82
 local MAXUP, LEG = 12, 30
 local HOVER = 0.5             -- 放置時停在整數高度上方這麼多 (實測位置只會停在 0.25 的倍數，且有 ±0.005 的雜訊；+0.25~+0.75 都放得到目標層，0.5 離上下邊界最遠：
                            -- 停在剛好整數高度，約一半機率 floor 掉到下一層，方塊就放錯層)
-local ACCEL = 6               -- 無人機加速度 (OC 預設較小；設 0 = 不改)。每層爬 1 格、每次換位都靠它加減速，是最大的時間來源；太大可能停不準，觀察失敗行的偏差再調
 local WAIT = 0.05            -- 每次放置前固定等這麼久 (秒)；實測 0.05 就夠，真正的問題是起始層算錯 (已修)
 local HOP = 10                 -- 水平距離不超過這個就低空平移，超過就升到巡航高度
 local LOW_FRAC, RESUME_FRAC = 0.10, 0.30   -- 電量保險：低於 10% 懸停等充電，充到 30% 再動
@@ -282,8 +281,7 @@ if not me or not db then
   return
 end
 
-local acc = ACCEL > 0 and select(2, pcall(d.setAcceleration, ACCEL)) or ""
-d.setStatusText("MTN " .. tostring(acc))        -- 狀態文字顯示實際生效的加速度
+d.setStatusText("MTN")
 while true do
   local sig, _, _, _, _, _, cmd, id, cruise, payload = computer.pullSignal()
   if sig == "modem_message" and cmd == "build_batch" then
