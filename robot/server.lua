@@ -7,11 +7,11 @@ event.shouldInterrupt = function() return false end
 for a in require('component').list('relay') do require('component').invoke(a, 'setStrength', 16) end
 
 -- 無人機開機時下載並執行的程式，依「通道」分開指定：每個通道 (A、B、C...) 可以給不同程式。
--- 沒列出的通道使用 DEFAULT_PROGRAM。例：A、C 通道蓋山，B 通道掃描地形。
+-- 沒列出的通道使用 DEFAULT_PROGRAM。例：B、C 通道蓋山，A 通道掃描地形。
 local DEFAULT_PROGRAM = "drone_task.lua"
 local DRONE_PROGRAMS = {
-  ["A"] = "mountain_task.lua",   -- 蓋山 (建築無人機)
-  ["B"] = "scan_task.lua",       -- 掃描機
+  ["A"] = "scan_task.lua",       -- (掃描機，已掃完；要再掃時用)
+  ["B"] = "mountain_task.lua",   -- 蓋山 (建築無人機)
   ["C"] = "mountain_task.lua",   -- 蓋山 (建築無人機)
 }
 

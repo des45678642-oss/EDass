@@ -2,7 +2,7 @@
 -- 每欄是一段垂直的殼 (start..h 層)，由下往上蓋：無人機停在目標格正上方，用 place(0) 往腳下放，
 -- 放完往上升一格再放。OC 放置規則：目標格的腳下或四個側邊有方塊就放得上去 (產生器已保證順序可行)。
 --
--- 材料：背包只有 4 格，用 ME 升級按需請求。資料庫 (database) 不用手動設定：第一次用到某種材料時，
+-- 材料：背包 SLOTS 格 (目前 8)，用 ME 升級按需請求。資料庫 (database) 不用手動設定：第一次用到某種材料時，
 --   程式會用 ME 的 store 把該材料寫進資料庫的對應項目 (編號見 ENTRY)，再用 requestItems 請求。
 --   材料的名稱與損傷值在下面的 ITEM 表，不是這些方塊 (例如其他模組的石頭) 就改這張表。
 --   ME 網路裡必須有這些材料。
@@ -30,6 +30,7 @@ local ITEM = {                                                   -- 各材料的
   D = { name = "minecraft:dirt", damage = 0 },                  -- 泥土
   F = { name = "minecraft:coal_block", damage = 0 },            -- 發電升級的燃料 (煤炭塊燃燒 16000 tick，比煤炭耐燒 10 倍)
 }
+local SLOTS = 8               -- 背包格數 (物品欄升級)；6 種材料可以全部常駐，剩下的給燃料暫用
 local FUEL_MIN = 8             -- 發電升級裡的燃料少於這個數量就補
 local WX0, WZ0, BASE = -200.5, -49.5, 82
 local MAXUP, LEG = 12, 30
@@ -127,11 +128,11 @@ local function setup_entry(m)
   ready[m] = true
 end
 
--- 背包 4 格當快取：要的材料不在就向 ME 請求，沒有空槽就把最久沒用的還給 ME
+-- 背包當快取：要的材料不在就向 ME 請求，沒有空槽就把最久沒用的還給 ME
 local slot_m, slot_t, clock = {}, {}, 0
 local function free_slot()                 -- 選一個空槽 (沒有就挑最久沒用的、把裡面的還給 ME)，並選取它
   local pick, best = 1, math.huge
-  for s = 1, 4 do
+  for s = 1, SLOTS do
     local score = d.count(s) == 0 and -1 or (slot_t[s] or 0)
     if score < best then pick, best = s, score end
   end
@@ -144,7 +145,7 @@ end
 
 local function stock(m)
   clock = clock + 1
-  for s = 1, 4 do
+  for s = 1, SLOTS do
     if slot_m[s] == m and d.count(s) > 0 then slot_t[s] = clock return s end
   end
   local pick = free_slot()

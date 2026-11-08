@@ -10,7 +10,7 @@ local SERVER_PORT = 100
 modem.open(SERVER_PORT)
 
 -- ────────── 設定 ──────────
-local TAGS = { "A", "C" }          -- 要出動的通道 (中繼 server.lua 的 TUNNEL_POOL 要有)
+local TAGS = { "B", "C" }          -- 要出動的通道 (中繼 server.lua 的 TUNNEL_POOL 要有)
 local BATCH = 40                   -- 每批欄數：每批 ≈ 1 KB，遠低於封包上限 8192
 local CRUISE = 203                 -- 巡航高度 (山最高頂面 + 3)；mountain.py 會印出「無人機巡航高度至少 Y=」
 local PROGRESS = "mountain_progress.txt"

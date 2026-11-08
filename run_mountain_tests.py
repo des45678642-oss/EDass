@@ -31,7 +31,7 @@ class MSim(Sim):
 
     def __init__(self, solid, start, supply=None, **kw):
         super().__init__(solid, start, **kw)
-        self.slots = {s: [None, 0] for s in range(1, 5)}
+        self.slots = {s: [None, 0] for s in range(1, 9)}
         self.sel = 1
         self.blocks = {}                  # (x, y, z) -> 材質編號
         self.me_requests = 0
@@ -42,6 +42,7 @@ class MSim(Sim):
         self.dbslots = {}                 # 資料庫項目 -> 材料名稱
         self.store_calls = 0
         self.place_fail = 0
+        self.returned = 0                 # 還給 ME 的次數 (背包不夠時才會發生)
 
     def tick(self):
         if self.generator:
@@ -116,6 +117,8 @@ class MSim(Sim):
         def send_items(*a):
             s = sim.slots[sim.sel]
             n = s[1]
+            if n:
+                sim.returned += 1
             s[0], s[1] = None, 0
             return n
 
@@ -348,6 +351,14 @@ def t_no_fuel_not_fatal():
     assert failed == 0 and sim.blocks == expect, (done, failed)
 
 
+def t_eight_slots_no_thrash():
+    # 8 格：6 種材料可以全部常駐，不需要把材料還給 ME (4 格時才會互相擠掉)
+    lines, expect, h = small_mountain()
+    sim = make_sim()
+    sim.run([";".join(lines)], cruise=int(81 + h.max() + 4))
+    assert sim.blocks == expect and sim.returned == 0, sim.returned
+
+
 test("蓋出來的方塊和清單完全一致、每塊都符合放置規則", t_build_matches_plan)
 test("ME 按需請求：每種材料請求過、有快取不是每塊都請求", t_me_on_demand)
 test("ME 供不出材料：回報 ERROR 並中止，不假裝完成", t_me_empty)
@@ -358,5 +369,6 @@ test("ME 網路沒有某材料：回報 ERROR 並指出材料名稱", t_missing_
 test("沒裝攝影機：照樣蓋得出來", t_no_camera)
 test("發電升級：批次開始補燃料，材料快取不受影響", t_generator_fuel)
 test("ME 沒有燃料：不致命，電量夠就照蓋", t_no_fuel_not_fatal)
+test("8 格背包：材料全部常駐，不用還給 ME", t_eight_slots_no_thrash)
 print(f"\n{sum(results)} passed, {len(results) - sum(results)} failed")
 sys.exit(0 if all(results) else 1)

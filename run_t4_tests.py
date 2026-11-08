@@ -64,7 +64,7 @@ def run(tmp, cmds, answer):
 
 def setup(a_lines, c_lines):
     tmp = tempfile.mkdtemp()
-    pathlib.Path(tmp, "mountain_cols_A.txt").write_text("\n".join(a_lines) + "\n")
+    pathlib.Path(tmp, "mountain_cols_B.txt").write_text("\n".join(a_lines) + "\n")
     pathlib.Path(tmp, "mountain_cols_C.txt").write_text("\n".join(c_lines) + "\n")
     return tmp
 
@@ -89,20 +89,20 @@ def test(name, fn):
 def t_all_batches():
     tmp = setup(A, C)
     sent = run(tmp, ["start", "y"], lambda tag, bid, payload: (payload.count(";") + 1, 0, ""))
-    got = {"A": [], "C": []}
+    got = {"B": [], "C": []}
     for tag, bid, cruise, payload in sent:
         assert cruise == 203
         got[tag] += payload.split(";")
-    assert got["A"] == A and got["C"] == C, (len(got["A"]), len(got["C"]))
+    assert got["B"] == A and got["C"] == C, (len(got["B"]), len(got["C"]))
     assert all(len(p.split(";")) <= 40 for _, _, _, p in sent)
     prog = pathlib.Path(tmp, "mountain_progress.txt").read_text()
-    assert "A 100" in prog and "C 70" in prog, prog
+    assert "B 100" in prog and "C 70" in prog, prog
 
 
 def t_waits_for_ack():
     tmp = setup(A, C)
     sent = run(tmp, ["start", "y"], lambda tag, bid, payload: None)     # 都不回報：每台只會送出第一批
-    assert [s[0] for s in sent] == ["A", "C"] and all(s[1] == 1 for s in sent), [(s[0], s[1]) for s in sent]
+    assert [s[0] for s in sent] == ["B", "C"] and all(s[1] == 1 for s in sent), [(s[0], s[1]) for s in sent]
 
 
 def t_resume():
@@ -120,8 +120,8 @@ def t_resume():
     for tag, bid, cruise, payload in sent:
         first.setdefault(tag, payload.split(";")[0])
     done = dict((l.split()[0], int(l.split()[1])) for l in prog1.strip().splitlines())
-    assert first["A"] == A[done["A"]] and first["C"] == C[done["C"]], (first, done)
-    assert pathlib.Path(tmp, "mountain_progress.txt").read_text().split() == ["A", "100", pathlib.Path(tmp, "mountain_cols_A.txt").stat().st_size.__str__(), "C", "70", pathlib.Path(tmp, "mountain_cols_C.txt").stat().st_size.__str__()]
+    assert first["B"] == A[done["B"]] and first["C"] == C[done["C"]], (first, done)
+    assert pathlib.Path(tmp, "mountain_progress.txt").read_text().split() == ["B", "100", pathlib.Path(tmp, "mountain_cols_B.txt").stat().st_size.__str__(), "C", "70", pathlib.Path(tmp, "mountain_cols_C.txt").stat().st_size.__str__()]
 
 
 test("兩台各自把清單分批送完，內容與順序不變，進度存檔", t_all_batches)
