@@ -14,6 +14,7 @@ local TAGS = { "B", "C" }          -- 要出動的通道 (中繼 server.lua 的 
 local BATCH = 40                   -- 每批欄數：每批 ≈ 1 KB，遠低於封包上限 8192
 local CRUISE = 203                 -- 巡航高度 (山最高頂面 + 3)；mountain.py 會印出「無人機巡航高度至少 Y=」
 local PROGRESS = "mountain_progress.txt"
+local function failfile(tag) return "mountain_failed_" .. tag .. ".txt" end   -- 失敗紀錄：每批一行「批次id 失敗數 x,z,原因;...」
 local WARN_SECONDS = 900           -- 超過這麼久沒收到回報就提醒 (掃一批要幾分鐘；沒電的話無人機會自己等充電)
 -- ──────────────────────────
 
@@ -37,6 +38,11 @@ local function saveProgress(p)
   local f = io.open(PROGRESS, "w")
   for _, tag in ipairs(TAGS) do f:write(string.format("%s %d %d\n", tag, p[tag].done, p[tag].off)) end
   f:close()
+end
+
+local function logFailed(tag, id, n, why)
+  local f = io.open(failfile(tag), "a")
+  if f then f:write(string.format("%s %s %s\n", tostring(id), tostring(n), tostring(why))) f:close() end
 end
 
 local function countLines(path)
@@ -121,7 +127,10 @@ local function run()
           silent_since[tag] = os.clock()
           io.write(string.format("\r通道 %s：%d / %d 欄 (%.1f%%) 本批失敗 %s    ", tag, progress[tag].done, total[tag],
             100 * progress[tag].done / total[tag], tostring(raw[12])))
-          if (tonumber(raw[12]) or 0) > 0 then print("\n   失敗清單 (x,z,原因): " .. tostring(raw[13])) end
+          if (tonumber(raw[12]) or 0) > 0 then
+            print("\n   失敗清單 (x,z,原因): " .. tostring(raw[13]) .. "\n   (已記錄到 " .. failfile(tag) .. ")")
+            logFailed(tag, b.id, raw[12], raw[13])
+          end
           send(tag)
         elseif kind == "ERROR" then
           print(string.format("\n🚨 通道 %s 回報錯誤: %s\n   (這一批沒有計入進度；排除問題後輸入 resume)", tostring(tag), tostring(raw[10])))
@@ -148,7 +157,7 @@ while true do
   elseif input == "start" then
     print("⚠️ 這會清除進度並從頭開始，確定請輸入 y：")
     if io.read() == "y" then
-      for _, tag in ipairs(TAGS) do progress[tag] = { done = 0, off = 0 } end
+      for _, tag in ipairs(TAGS) do progress[tag] = { done = 0, off = 0 } io.open(failfile(tag), "w"):close() end
       saveProgress(progress)
       run()
     end

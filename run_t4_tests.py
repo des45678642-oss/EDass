@@ -124,6 +124,15 @@ def t_resume():
     assert pathlib.Path(tmp, "mountain_progress.txt").read_text().split() == ["B", "100", pathlib.Path(tmp, "mountain_cols_B.txt").stat().st_size.__str__(), "C", "70", pathlib.Path(tmp, "mountain_cols_C.txt").stat().st_size.__str__()]
 
 
+def t_failed_log():
+    tmp = setup(A, C)
+    run(tmp, ["start", "y"], lambda tag, bid, payload: (payload.count(";") + 1, 2 if tag == "B" and bid == 1 else 0, "-28,219,place@3;5,6,travel"))
+    fb = pathlib.Path(tmp, "mountain_failed_B.txt").read_text().splitlines()
+    assert fb == ["1 2 -28,219,place@3;5,6,travel"], fb
+    assert pathlib.Path(tmp, "mountain_failed_C.txt").read_text() == ""
+
+
+test("失敗的欄寫入 mountain_failed_<通道>.txt", t_failed_log)
 test("兩台各自把清單分批送完，內容與順序不變，進度存檔", t_all_batches)
 test("沒收到整批回報前不會送下一批", t_waits_for_ack)
 test("中斷後 resume 從存檔的位置接著送", t_resume)
