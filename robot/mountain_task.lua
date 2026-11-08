@@ -198,12 +198,12 @@ local function steady(wx, wz, wy)
   return align(wx, wz, wy) ~= false
 end
 
--- 放置前確認高度在安全範圍：整數 +0.25 ~ +0.75 (低於整數會掉到下一層放錯層，超過下一個整數會算在上一層)
+-- 放置前確認高度在安全範圍：整數 +0.3 ~ +0.6 (低於整數會掉到下一層放錯層；實測太高有時會放到奇怪的位置)
 local function yok(wx, wz, layer)
   for _ = 1, 3 do
     local _, cy = pos()
     local dy = cy - BASE - layer
-    if dy >= 0.25 and dy <= 0.75 then return true end
+    if dy >= 0.3 and dy <= 0.6 then return true end
     align(wx, wz, BASE + layer + HOVER)
   end
   return false
