@@ -338,15 +338,17 @@ def assign_materials(h, seed=11, interior="S", shell=0, start=None):
 
 
 def order_bands(ok, fill, h, band=24, tile=6):
-    """施工順序：由低到高分帶 (每帶 band 層)；同一帶再切成 tile×tile 的小塊，小塊之間用蛇形列序，
-    每一塊「從最低的地方開始」(殼起點最低、接得上的欄)，再往相鄰、較高的欄一路蓋上去。
-    還沒有接點的欄先跳過，等相鄰的塊蓋好再回來。tile=0 時退回整帶的蛇形列序。
-    fill、h 是 {(a, b): 值}；回傳 (順序, 接不上的欄)。(逐層嚴格由低到高路徑太長，所以折衷成分帶 + 小塊。)"""
+    """施工順序：依「欄的頂面高度 h」由低到高分帶 (每帶 band 層)，所以山是從山腳一圈圈往上長，
+    不會先蓋出一根根又高又長的柱子。同一帶再切成 tile×tile 的小塊，小塊之間用蛇形列序，
+    每一塊從最低 (h 最小，再比殼起點) 的、接得上的欄開始，往相鄰較低的欄一路蓋上去。
+    殼的第一塊要靠相鄰欄支撐 (鄰欄 fill' <= fill <= h')：接不上的欄先跳過，順延到下一輪 / 下一帶再回來。
+    tile=0 時整帶用蛇形列序。fill、h 是 {(a, b): 值}；回傳 (順序, 最後都接不上的欄)。
+    (逐層嚴格由低到高路徑太長，所以折衷成分帶 + 小塊。)"""
     import heapq
     bands = {}
     for p in ok:
-        bands.setdefault((fill[p] - 1) // band, []).append(p)
-    built, order, bad = set(), [], []
+        bands.setdefault((h[p] - 1) // band, []).append(p)
+    built, order = set(), []
 
     def can(p):
         if fill[p] <= 1:
@@ -360,11 +362,16 @@ def order_bands(ok, fill, h, band=24, tile=6):
     def raster(p):
         return (p[0], p[1] if p[0] % 2 == 0 else -p[1])
 
+    def low(p):
+        return (h[p], fill[p])
+
+    carry = []                                       # 前面的帶接不上、順延過來的欄
     for b in sorted(bands):
         left = []
+        members = bands[b] + carry
         if tile:
             groups = {}
-            for p in bands[b]:
+            for p in members:
                 groups.setdefault((p[0] // tile, p[1] // tile), []).append(p)
             for k in sorted(groups, key=lambda k: (k[0], k[1] if k[0] % 2 == 0 else -k[1])):
                 pending = set(groups[k])
@@ -373,11 +380,11 @@ def order_bands(ok, fill, h, band=24, tile=6):
                 while pending:
                     seed = None                       # 這一塊裡接得上的欄中最低的
                     for p in by_raster:
-                        if p in pending and can(p) and (seed is None or fill[p] < fill[seed]):
+                        if p in pending and can(p) and (seed is None or low(p) < low(seed)):
                             seed = p
                     if seed is None:
                         break
-                    pq, queued = [(fill[seed], cnt, seed)], {seed}
+                    pq, queued = [(low(seed), cnt, seed)], {seed}
                     cnt += 1
                     while pq:
                         _, _, p = heapq.heappop(pq)
@@ -390,11 +397,11 @@ def order_bands(ok, fill, h, band=24, tile=6):
                             n = (p[0] + dz, p[1] + dx)
                             if n in pending and n not in queued:
                                 queued.add(n)
-                                heapq.heappush(pq, (fill[n], cnt, n))
+                                heapq.heappush(pq, (low(n), cnt, n))
                                 cnt += 1
                 left.extend(pending)
         else:
-            left = list(bands[b])
+            left = members
         todo = sorted(left, key=raster)
         while todo:
             nxt = []
@@ -404,11 +411,11 @@ def order_bands(ok, fill, h, band=24, tile=6):
                     order.append(p)
                 else:
                     nxt.append(p)
-            if len(nxt) == len(todo):                # 這一帶剩下的都接不上：留給「無法支撐」
-                bad.extend(nxt)
+            if len(nxt) == len(todo):                # 這一帶剩下的都接不上：順延到下一帶
                 break
             todo = nxt
-    return order, bad
+        carry = todo
+    return order, carry
 
 
 def plan_support(h, start, pts, center=(208, 208), cv=None, band=24, tile=6):
