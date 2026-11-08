@@ -192,33 +192,71 @@ local function travel(wx, wz, ty, cruise)
   return fly(wx, wz)
 end
 
+-- 對準欄位正中心：放置的射線只比目標格多伸進鄰格 0.15 格，偏離超過這個就會打空
+local function align(wx, wz)
+  local cx, _, cz = pos()
+  local dx, dz = wx - cx, wz - cz
+  if math.abs(dx) > 0.03 or math.abs(dz) > 0.03 then go(dx, 0, dz) end
+end
+
+-- 蓋一欄 (可重複執行：已經蓋好的層會跳過，所以失敗重試、續蓋、補蓋都安全)
 local function build_column(x, z, h, mats, cruise)
   local seq, s = parse(mats)
-  if not travel(WX0 + x, WZ0 - z, BASE + h + 2, cruise) then return false, "travel" end
+  local wx, wz = WX0 + x, WZ0 - z
+  if not travel(wx, wz, BASE + h + 2, cruise) then return false, "travel" end
+  align(wx, wz)
+  -- 往下走到殼起點；途中被已經蓋好的方塊擋住就停在它上面，從那一層接著看 (續蓋、補蓋都靠這個)
   local _, cy = pos()
-  if not vert(BASE + s - cy) then return false, "descend" end
-  for layer = s, h do
-    if layer > s and not go(0, 1, 0) then return false, "climb@" .. layer end
-    d.select(stock(seq[layer]))
-    if not d.place(0) then return false, "place@" .. layer end
+  go(0, BASE + s - cy, 0)
+  _, cy = pos()
+  for layer = math.max(s, math.floor(cy - BASE + 0.1)), h do
+    _, cy = pos()
+    if cy < BASE + layer - 0.05 and not go(0, BASE + layer - cy, 0) then return false, "climb@" .. layer end
+    local _, what = d.detect(0)
+    if what ~= "solid" then                      -- 腳下那格還是空的才放
+      _, cy = pos()
+      if math.abs(cy - (BASE + layer)) > 0.05 and not go(0, BASE + layer - cy, 0) then return false, "climb@" .. layer end
+      d.select(stock(seq[layer]))
+      local ok = false
+      for try = 1, 3 do
+        ok = d.place(0)
+        if ok then break end
+        computer.pullSignal(0.3)                 -- 失敗：等一下、重新對準再試 (鄰欄的方塊可能剛放好還沒更新)
+        align(wx, wz)
+      end
+      if not ok then return false, "place@" .. layer end
+    end
   end
   return true
 end
 
 local function run_batch(id, cruise, payload)
-  local done, failed, why = 0, 0, {}
+  local cols, failed = {}, {}
   for line in payload:gmatch("[^;]+") do
     local x, z, h, mats = line:match("^(-?%d+) (-?%d+) (%d+) (%S+)$")
-    if x then
-      local ok, r, reason = pcall(build_column, tonumber(x), tonumber(z), tonumber(h), mats, cruise)
-      if not ok then report("ERROR", tostring(r)) return end      -- 致命 (ME 供不出等)：整批中止，不回報完成
-      if r then done = done + 1 else
-        failed = failed + 1
-        if #why < 8 then why[#why + 1] = x .. "," .. z .. "," .. tostring(reason) end
-      end
-    end
+    if x then cols[#cols + 1] = { tonumber(x), tonumber(z), tonumber(h), mats } end
   end
-  report("BATCH_DONE", id, done, failed, table.concat(why, ";"))
+  local done = 0
+  local function try(c)
+    local ok, r, reason = pcall(build_column, c[1], c[2], c[3], c[4], cruise)
+    if not ok then report("ERROR", tostring(r)) return nil end      -- 致命 (ME 供不出等)：整批中止，不回報完成
+    return r, reason
+  end
+  for _, c in ipairs(cols) do
+    local r, reason = try(c)
+    if r == nil and reason == nil then return end
+    if r then done = done + 1 else failed[#failed + 1] = { c, reason } end
+  end
+  -- 失敗的欄 (多半是它的支撐欄剛好在後面才蓋好)：整批做完後再試一次
+  local still = {}
+  for _, f in ipairs(failed) do
+    local c = f[1]
+    local r, reason = try(c)
+    if r == nil and reason == nil then return end
+    if r then done = done + 1 else still[#still + 1] = c[1] .. "," .. c[2] .. "," .. tostring(reason) end
+  end
+  local why = table.concat(still, ";")
+  report("BATCH_DONE", id, done, #still, why:sub(1, 1200))
 end
 
 if not me or not db then

@@ -61,8 +61,13 @@ class MSim(Sim):
         if cnt <= 0 or tgt in self.solid:
             self.place_fail += 1
             return False
-        if not any((tgt[0] + dx, tgt[1] + dy, tgt[2] + dz) in self.solid
-                   for dx, dy, dz in ((0, -1, 0), (1, 0, 0), (-1, 0, 0), (0, 0, 1), (0, 0, -1))):
+        # 放置射線：往下找腳下的方塊；找不到再朝四個側邊各射 0.65 格，只比目標格多伸進鄰格 0.15 格，
+        # 所以無人機在目標格內偏離中心超過 0.15 (往那一側的反方向) 就打不到鄰格的方塊
+        ox, oz = self.p[0] - (x + 0.5), self.p[2] - (z + 0.5)
+        below = (tgt[0], tgt[1] - 1, tgt[2]) in self.solid
+        side = any((tgt[0] + dx, tgt[1], tgt[2] + dz) in self.solid and ox * dx + oz * dz >= -0.15
+                   for dx, dz in ((1, 0), (-1, 0), (0, 1), (0, -1)))
+        if not (below or side):
             self.place_fail += 1
             return False
         self.solid.add(tgt)
@@ -128,6 +133,8 @@ class MSim(Sim):
                 "getOffset": lambda: math.dist(sim.target, sim.p), "getVelocity": lambda: sim.vel,
                 "select": select, "count": lambda s=None: sim.slots[int(s or sim.sel)][1],
                 "place": lambda side=0: sim.mplace(),
+                "detect": lambda side=0: ((True, "solid") if (math.floor(sim.p[0]), math.floor(sim.p[1]) - 1,
+                                                              math.floor(sim.p[2])) in sim.solid else (False, "air")),
             }),
             "navigation": lua.table_from({"getPosition": lambda: tuple(sim.p), "getRange": lambda: 1e9}),
             "tunnel": lua.table_from({"send": lambda *a: sim.send(a)}),
@@ -359,6 +366,46 @@ def t_eight_slots_no_thrash():
     assert sim.blocks == expect and sim.returned == 0, sim.returned
 
 
+def t_idempotent_rerun():
+    # 同一批再送一次 (斷線重送、補蓋)：不會失敗，也不會多放或少放
+    lines, expect, h = small_mountain()
+    sim = make_sim()
+    payload = ";".join(lines)
+    sim.run([payload, payload], cruise=int(81 + h.max() + 4))
+    done, failed, rep = done_counts(sim)
+    assert len(rep) == 2 and failed == 0 and done == 2 * len(lines), (len(rep), done, failed, [r[6] for r in rep])
+    assert sim.blocks == expect
+
+
+def t_partial_column_resume():
+    # 一欄蓋到一半 (前幾層已經在) 時續蓋：從已蓋的最高層接著往上
+    lines, expect, h = small_mountain()
+    sim = make_sim()
+    first = lines[0].split()
+    x, z, hh = int(first[0]), int(first[1]), int(first[2])
+    bx, bz = math.floor(-200.5 + x), math.floor(-49.5 - z)
+    mine = sorted((k for k in expect if k[0] == bx and k[2] == bz), key=lambda k: k[1])
+    for k in mine[:max(1, len(mine) // 2)]:             # 預先放好下半段
+        sim.solid.add(k)
+        sim.blocks[k] = expect[k]
+    sim.run([";".join(lines)], cruise=int(81 + h.max() + 4))
+    done, failed, rep = done_counts(sim)
+    assert failed == 0 and sim.blocks == expect, (done, failed, len(sim.blocks), len(expect))
+
+
+def t_deferred_retry():
+    # 把第一欄的支撐欄故意晚一批才送：第一欄在同批內失敗，之後會補蓋一次
+    lines, expect, h = small_mountain()
+    sim = make_sim()
+    swapped = lines[1:] + lines[:1] if False else None
+    # 取出一欄「需要鄰欄支撐」的欄 (殼起點 > 1)，放到整批最前面，它的支撐欄在它後面才會蓋好
+    need = [i for i, l in enumerate(lines) if "_" in l.split()[3] and i > 5][0]
+    reordered = [lines[need]] + lines[:need] + lines[need + 1:]
+    sim.run([";".join(reordered)], cruise=int(81 + h.max() + 4))
+    done, failed, rep = done_counts(sim)
+    assert failed == 0 and done == len(lines) and sim.blocks == expect, (done, failed, rep[0][6] if rep else None)
+
+
 test("蓋出來的方塊和清單完全一致、每塊都符合放置規則", t_build_matches_plan)
 test("ME 按需請求：每種材料請求過、有快取不是每塊都請求", t_me_on_demand)
 test("ME 供不出材料：回報 ERROR 並中止，不假裝完成", t_me_empty)
@@ -370,5 +417,8 @@ test("沒裝攝影機：照樣蓋得出來", t_no_camera)
 test("發電升級：批次開始補燃料，材料快取不受影響", t_generator_fuel)
 test("ME 沒有燃料：不致命，電量夠就照蓋", t_no_fuel_not_fatal)
 test("8 格背包：材料全部常駐，不用還給 ME", t_eight_slots_no_thrash)
+test("同一批重送：重複執行安全", t_idempotent_rerun)
+test("蓋到一半的欄：從已蓋的最高層續蓋", t_partial_column_resume)
+test("失敗的欄在整批結束後補蓋一次", t_deferred_retry)
 print(f"\n{sum(results)} passed, {len(results) - sum(results)} failed")
 sys.exit(0 if all(results) else 1)
