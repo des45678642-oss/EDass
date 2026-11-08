@@ -337,7 +337,7 @@ def assign_materials(h, seed=11, interior="S", shell=0, start=None):
     return cols, totals, top_mat, start
 
 
-def order_bands(ok, fill, h, band=24, tile=6):
+def order_bands(ok, fill, h, band=8, tile=6):
     """施工順序：依「欄的頂面高度 h」由低到高分帶 (每帶 band 層)，所以山是從山腳一圈圈往上長，
     不會先蓋出一根根又高又長的柱子。同一帶再切成 tile×tile 的小塊，小塊之間用蛇形列序，
     每一塊從最低 (h 最小，再比殼起點) 的、接得上的欄開始，往相鄰較低的欄一路蓋上去。
@@ -418,7 +418,7 @@ def order_bands(ok, fill, h, band=24, tile=6):
     return order, carry
 
 
-def plan_support(h, start, pts, center=(208, 208), cv=None, band=24, tile=6):
+def plan_support(h, start, pts, center=(208, 208), cv=None, band=8, tile=6):
     """決定一台無人機的「殼起點」與施工順序，保證每一欄的第一塊都放得上去。
 
     OC 的放置規則：目標格的鄰格 (腳下、四個側邊) 有方塊就放得上去。一欄的殼是 start..h 一路蓋到頂，

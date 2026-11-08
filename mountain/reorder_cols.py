@@ -1,6 +1,6 @@
 """把已經產生好的 mountain_cols_*.txt 依新的施工順序重排 (不改山的形狀和材質，只改順序)。
-順序規則見 mountain.py 的 order_bands：分帶 (每帶 24 層)，同一帶切成小塊，每塊從最低的地方開始往上蓋。
-用法: python reorder_cols.py <輸入資料夾> <輸出資料夾> [tile=6] [band=24]
+順序規則見 mountain.py 的 order_bands：分帶 (每帶 8 層)，同一帶切成小塊，每塊從最低的地方開始往上蓋。
+用法: python reorder_cols.py <輸入資料夾> <輸出資料夾> [tile=6] [band=8]
 輸出後請用 verify_plan.py 檢查。"""
 import pathlib
 import re
@@ -10,7 +10,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).parent))
 from mountain import order_bands  # noqa: E402
 
 
-def reorder(src, dst, band=24, tile=6):
+def reorder(src, dst, band=8, tile=6):
     rows, fill, hh = {}, {}, {}
     for line in open(src, encoding="utf-8"):
         x, z, h, mats = line.split()
@@ -31,7 +31,7 @@ def reorder(src, dst, band=24, tile=6):
 if __name__ == "__main__":
     src, dst = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2])
     tile = int(sys.argv[3]) if len(sys.argv) > 3 else 6
-    band = int(sys.argv[4]) if len(sys.argv) > 4 else 24
+    band = int(sys.argv[4]) if len(sys.argv) > 4 else 8
     dst.mkdir(parents=True, exist_ok=True)
     for f in sorted(src.glob("mountain_cols_*.txt")):
         n, bad = reorder(f, dst / f.name, band, tile)
