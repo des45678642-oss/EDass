@@ -171,9 +171,15 @@ local function travel(wx, wz, ty, cruise)
 end
 
 -- 對準欄位正中心：放置的射線只比目標格多伸進鄰格 0.15 格，偏離超過這個就會打空
-local function settle()                    -- 等無人機真的停穩 (到位 != 停穩，還在飄的時候射線會偏)
-  for _ = 1, 30 do
-    if d.getVelocity() < 0.02 then return end
+local function settle()                    -- 等無人機真的停穩：連續 3 次速度都幾乎為 0 (到位 != 停穩，還在飄的時候射線會偏)
+  local calm = 0
+  for _ = 1, 60 do
+    if d.getVelocity() < 0.01 then
+      calm = calm + 1
+      if calm >= 3 then return end
+    else
+      calm = 0
+    end
     computer.pullSignal(0.05)
   end
 end
@@ -182,6 +188,17 @@ local function align(wx, wz, wy)
   local cx, cy, cz = pos()
   local dx, dy, dz = wx - cx, (wy or cy) - cy, wz - cz
   if math.abs(dx) > 0.03 or math.abs(dy) > 0.03 or math.abs(dz) > 0.03 then return go(dx, dy, dz) end
+  return true
+end
+
+-- 從上方接近 (比目標低就先多升一格再降回來，往下停比往上停穩)、對準三軸、等停穩
+local function steady(wx, wz, wy)
+  local _, cy = pos()
+  if cy < wy - 0.05 and not go(0, wy + 1 - cy, 0) then return false end
+  align(wx, wz, wy)
+  settle()
+  align(wx, wz, wy)
+  settle()
   return true
 end
 
@@ -196,21 +213,21 @@ local function build_column(x, z, h, mats, cruise)
   go(0, BASE + s - cy, 0)
   _, cy = pos()
   for layer = math.max(s, math.floor(cy - BASE + 0.1)), h do
-    _, cy = pos()
-    if cy < BASE + layer - 0.05 and not go(0, BASE + layer - cy, 0) then return false, "climb@" .. layer end
+    if not steady(wx, wz, BASE + layer) then return false, "climb@" .. layer end
     local _, what = d.detect(0)
     if what ~= "solid" then                      -- 腳下那格還是空的才放
-      _, cy = pos()
-      if math.abs(cy - (BASE + layer)) > 0.05 and not go(0, BASE + layer - cy, 0) then return false, "climb@" .. layer end
       local ok, why, slot = false, nil, nil
       for try = 1, 4 do
         slot = stock(seq[layer])
         d.select(slot)                           -- 每次都重新選：補燃料 / 補貨可能換掉了選取的槽
-        settle()
         ok, why = d.place(0)
-        if ok then break end
-        computer.pullSignal(0.3)                 -- 失敗：等一下，水平和高度都重新對準再試
-        align(wx, wz, BASE + layer)
+        if ok then
+          local _, w = d.detect(0)               -- place 找不到目標會改放四周：確認腳下真的有方塊才算成功
+          if w == "solid" then break end
+          ok, why = false, "side"
+        end
+        computer.pullSignal(0.3)
+        steady(wx, wz, BASE + layer)
       end
       if not ok then                             -- 失敗原因附上現場狀態，方便從失敗紀錄判斷
         local cx, cy2, cz = pos()

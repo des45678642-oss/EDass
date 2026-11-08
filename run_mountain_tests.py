@@ -312,6 +312,27 @@ def t_basin_needs_plan():
     assert failed == 0 and sim.place_fail == 0 and sim.blocks == expect, (failed, sim.place_fail)
 
 
+def t_stray_not_success():
+    # OC 的 place 找不到目標會改放到四周並回傳 true：腳下沒有方塊就不能算成功
+    lines, expect, h = basin_plateau(planned=False)
+    sim = make_sim()
+    orig = sim.mplace
+    stray = {"n": 0}
+
+    def mplace():
+        if orig():
+            return True
+        x, y, z = (math.floor(c) for c in sim.p)
+        sim.solid.add((x + 1, y, z)); stray["n"] += 1       # 放到旁邊去了
+        return True
+
+    sim.mplace = mplace
+    sim.run([";".join(lines)], cruise=int(81 + h.max() + 4))
+    done, failed, rep = done_counts(sim)
+    assert stray["n"] > 0 and failed > 0 and done + failed == len(lines), (stray, done, failed)
+    assert all(v for v in [rep[0][6]]) and "side" in rep[0][6] or failed > 8, rep[0][6]
+
+
 def t_db_auto_setup():
     lines, expect, h = small_mountain()
     sim = make_sim()
@@ -411,6 +432,7 @@ test("ME 按需請求：每種材料請求過、有快取不是每塊都請求",
 test("ME 供不出材料：回報 ERROR 並中止，不假裝完成", t_me_empty)
 test("無法抵達的欄：記錄失敗，其餘繼續", t_blocked_column)
 test("盆地高原：亂序放不上去，規劃過的順序全部放得上去", t_basin_needs_plan)
+test("放到旁邊不算成功：腳下沒方塊就回報失敗", t_stray_not_success)
 test("資料庫由程式自己寫入：每種材料只寫一次", t_db_auto_setup)
 test("ME 網路沒有某材料：回報 ERROR 並指出材料名稱", t_missing_material)
 test("沒裝攝影機：照樣蓋得出來", t_no_camera)
