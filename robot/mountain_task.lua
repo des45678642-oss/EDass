@@ -16,10 +16,11 @@ local n = component.proxy(component.list("navigation")())
 local t = component.proxy(component.list("tunnel")())
 local me = component.proxy(component.list("upgrade_me")() or "")
 local db = component.proxy(component.list("database")() or "")
+local g = component.proxy(component.list("generator")() or "")
 local ca = component.list("camera")()
 local cam = ca and component.proxy(ca)
 
-local ENTRY = { S = 1, T = 2, C = 3, N = 4, G = 5, D = 6 }   -- 各材料用的資料庫項目編號
+local ENTRY = { S = 1, T = 2, C = 3, N = 4, G = 5, D = 6, F = 7 }   -- 各材料用的資料庫項目編號
 local ITEM = {                                                   -- 各材料的 ME 過濾條件 (1.7.10 名稱)
   S = { name = "minecraft:stone", damage = 0 },                 -- 石頭
   T = { name = "minecraft:stained_hardened_clay", damage = 7 },  -- 灰色陶瓦
@@ -27,7 +28,9 @@ local ITEM = {                                                   -- 各材料的
   N = { name = "minecraft:snow", damage = 0 },                  -- 雪 (方塊)
   G = { name = "minecraft:gravel", damage = 0 },                -- 砂礫
   D = { name = "minecraft:dirt", damage = 0 },                  -- 泥土
+  F = { name = "minecraft:coal_block", damage = 0 },            -- 發電升級的燃料 (煤炭塊燃燒 16000 tick，比煤炭耐燒 10 倍)
 }
+local FUEL_MIN = 8             -- 發電升級裡的燃料少於這個數量就補
 local WX0, WZ0, BASE = -200.5, -49.5, 82
 local MAXUP, LEG = 12, 30
 local HOP = 6                  -- 水平距離不超過這個就低空平移，超過就升到巡航高度
@@ -35,9 +38,11 @@ local LOW_FRAC, RESUME_FRAC = 0.10, 0.30   -- 電量保險：低於 10% 懸停�
 
 d.setStatusText("MTN")
 
+local ensure_fuel
 local function refuel()
   local maxe = computer.maxEnergy()
   if computer.energy() / maxe >= LOW_FRAC then return end
+  pcall(ensure_fuel)                 -- 電量低：先確認發電升級有燃料，再懸停等充電
   d.setStatusText("CHARGE")
   while computer.energy() / maxe < RESUME_FRAC do computer.pullSignal(2) end
   d.setStatusText("MTN")
@@ -124,11 +129,7 @@ end
 
 -- 背包 4 格當快取：要的材料不在就向 ME 請求，沒有空槽就把最久沒用的還給 ME
 local slot_m, slot_t, clock = {}, {}, 0
-local function stock(m)
-  clock = clock + 1
-  for s = 1, 4 do
-    if slot_m[s] == m and d.count(s) > 0 then slot_t[s] = clock return s end
-  end
+local function free_slot()                 -- 選一個空槽 (沒有就挑最久沒用的、把裡面的還給 ME)，並選取它
   local pick, best = 1, math.huge
   for s = 1, 4 do
     local score = d.count(s) == 0 and -1 or (slot_t[s] or 0)
@@ -137,11 +138,33 @@ local function stock(m)
   d.select(pick)
   if d.count(pick) > 0 then me.sendItems() end
   if d.count(pick) > 0 then error("ME 收不回槽 " .. pick .. " 的舊材料 (ME 滿了？)") end
+  slot_m[pick] = nil
+  return pick
+end
+
+local function stock(m)
+  clock = clock + 1
+  for s = 1, 4 do
+    if slot_m[s] == m and d.count(s) > 0 then slot_t[s] = clock return s end
+  end
+  local pick = free_slot()
   setup_entry(m)
   local got = me.requestItems(db.address, ENTRY[m], 64)
   if not got or got < 1 or d.count(pick) < 1 then error("ME 供不出材料 " .. m .. " (資料庫項目 " .. ENTRY[m] .. ")") end
   slot_m[pick], slot_t[pick] = m, clock
   return pick
+end
+
+-- 發電升級的燃料：無人機本身每 tick 耗 0.4 (每秒 8 點)，加區塊加載和太陽能，電量收支大約打平，
+-- 光靠太陽能懸停也充不回來。所以讓 ME 供煤炭塊，插進發電升級 (一個煤炭塊可發約 12800 點)。
+ensure_fuel = function()
+  if not g or g.count() >= FUEL_MIN then return end
+  local pick = free_slot()
+  setup_entry("F")
+  local got = me.requestItems(db.address, ENTRY.F, 64)
+  if not got or got < 1 then error("ME 供不出燃料 " .. ITEM.F.name) end
+  g.insert()
+  if d.count(pick) > 0 then me.sendItems() end   -- 發電升級插不下的還給 ME
 end
 
 -- "_37S2C1" -> 逐層材質表，以及殼起點層 (第一個不是 "_" 的層)
@@ -206,6 +229,7 @@ while true do
   local sig, _, _, _, _, _, cmd, id, cruise, payload = computer.pullSignal()
   if sig == "modem_message" and cmd == "build_batch" then
     d.setStatusText("MTN")
+    pcall(ensure_fuel)
     run_batch(id, tonumber(cruise) or 203, tostring(payload))
   end
 end

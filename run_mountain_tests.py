@@ -22,6 +22,7 @@ import mountain as M  # noqa: E402
 
 ITEM_NAME = dict(S="minecraft:stone", T="minecraft:stained_hardened_clay", C="minecraft:cobblestone",
                  N="minecraft:snow", G="minecraft:gravel", D="minecraft:dirt")
+FUEL = "minecraft:coal_block"
 ENTRY = dict(ITEM_NAME)            # 預期方塊以材料名稱記錄 (資料庫項目編號由程式自己決定)
 
 
@@ -35,10 +36,22 @@ class MSim(Sim):
         self.blocks = {}                  # (x, y, z) -> 材質編號
         self.me_requests = 0
         self.supply = supply              # None = 無限；否則 {材料名稱: 剩餘數量}
-        self.netitems = set(ITEM_NAME.values())   # ME 網路裡有的材料
+        self.netitems = set(ITEM_NAME.values()) | {FUEL}   # ME 網路裡有的材料
+        self.generator = False            # 是否裝了發電升級
+        self.gen_count, self.gen_burn, self.gen_inserts = 0, 0, 0
         self.dbslots = {}                 # 資料庫項目 -> 材料名稱
         self.store_calls = 0
         self.place_fail = 0
+
+    def tick(self):
+        if self.generator:
+            if self.gen_burn <= 0 and self.gen_count > 0:
+                self.gen_count -= 1
+                self.gen_burn = 800
+            if self.gen_burn > 0:
+                self.gen_burn -= 1
+                self.energy = min(self.max_energy, self.energy + 8)
+        super().tick()
 
     def mplace(self):
         item, cnt = self.slots[self.sel]
@@ -91,6 +104,15 @@ class MSim(Sim):
             sim.me_requests += 1
             return n
 
+        def gen_insert(*a):
+            s = sim.slots[sim.sel]
+            if s[1] <= 0 or s[0] != FUEL:
+                return False
+            sim.gen_count += s[1]
+            sim.gen_inserts += 1
+            s[0], s[1] = None, 0
+            return True
+
         def send_items(*a):
             s = sim.slots[sim.sel]
             n = s[1]
@@ -106,6 +128,7 @@ class MSim(Sim):
             }),
             "navigation": lua.table_from({"getPosition": lambda: tuple(sim.p), "getRange": lambda: 1e9}),
             "tunnel": lua.table_from({"send": lambda *a: sim.send(a)}),
+            "generator": lua.table_from({"count": lambda: sim.gen_count, "insert": gen_insert}),
             "upgrade_me": lua.table_from({"requestItems": request, "sendItems": send_items, "store": store}),
             "database": lua.table_from({"address": "db", "clear": lambda e: sim.dbslots.pop(int(e), None) and None,
                                         "get": lambda e: (lua.table_from({"name": sim.dbslots[int(e)]}) if int(e) in sim.dbslots else None)}),
@@ -117,6 +140,8 @@ class MSim(Sim):
         }
         if not self.camera:
             comps.pop("camera")
+        if not self.generator:
+            comps.pop("generator")
         g.component = lua.table_from({"list": lambda kind: (lambda *a: kind) if kind in comps else (lambda *a: None),
                                       "proxy": lambda addr: comps.get(addr)})
         self.queue = []
@@ -303,6 +328,26 @@ def t_no_camera():
     assert failed == 0 and sim.blocks == expect, (done, failed, len(sim.blocks), len(expect))
 
 
+def t_generator_fuel():
+    lines, expect, h = small_mountain()
+    sim = make_sim(energy=3000)
+    sim.generator = True
+    sim.run([";".join(lines[i:i + 20]) for i in range(0, len(lines), 20)], cruise=int(81 + h.max() + 4))
+    done, failed, _ = done_counts(sim)
+    assert sim.gen_inserts >= 1 and sim.gen_count + (800 if sim.gen_burn else 0) > 0, (sim.gen_inserts, sim.gen_count)
+    assert failed == 0 and sim.blocks == expect          # 材料不被燃料占掉的槽影響
+
+
+def t_no_fuel_not_fatal():
+    lines, expect, h = small_mountain()
+    sim = make_sim()
+    sim.generator = True
+    sim.netitems.discard(FUEL)                           # ME 裡沒有燃料：不致命 (電量夠就照蓋)
+    sim.run([";".join(lines)], cruise=int(81 + h.max() + 4))
+    done, failed, _ = done_counts(sim)
+    assert failed == 0 and sim.blocks == expect, (done, failed)
+
+
 test("蓋出來的方塊和清單完全一致、每塊都符合放置規則", t_build_matches_plan)
 test("ME 按需請求：每種材料請求過、有快取不是每塊都請求", t_me_on_demand)
 test("ME 供不出材料：回報 ERROR 並中止，不假裝完成", t_me_empty)
@@ -311,5 +356,7 @@ test("盆地高原：亂序放不上去，規劃過的順序全部放得上去",
 test("資料庫由程式自己寫入：每種材料只寫一次", t_db_auto_setup)
 test("ME 網路沒有某材料：回報 ERROR 並指出材料名稱", t_missing_material)
 test("沒裝攝影機：照樣蓋得出來", t_no_camera)
+test("發電升級：批次開始補燃料，材料快取不受影響", t_generator_fuel)
+test("ME 沒有燃料：不致命，電量夠就照蓋", t_no_fuel_not_fatal)
 print(f"\n{sum(results)} passed, {len(results) - sum(results)} failed")
 sys.exit(0 if all(results) else 1)
