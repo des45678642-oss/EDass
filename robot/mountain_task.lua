@@ -193,15 +193,9 @@ local function align(wx, wz, wy)
   return true
 end
 
--- 從上方接近 (比目標低就先多升一格再降回來，往下停比往上停穩)、對準三軸、等停穩
+-- 對準到欄中心的上方 (水平偏差要 0，垂直有 ±0.25 的餘量，不用特別等停穩、也不用從上方接近)
 local function steady(wx, wz, wy)
-  local _, cy = pos()
-  if cy < wy - 0.05 and not go(0, wy + 1 - cy, 0) then return false end
-  align(wx, wz, wy)
-  settle()
-  align(wx, wz, wy)
-  settle()
-  return true
+  return align(wx, wz, wy) ~= false
 end
 
 -- 蓋一欄 (可重複執行：已經蓋好的層會跳過，所以失敗重試、續蓋、補蓋都安全)
@@ -214,7 +208,7 @@ local function build_column(x, z, h, mats, cruise)
   local _, cy = pos()
   go(0, BASE + s + HOVER - cy, 0)
   _, cy = pos()
-  for layer = math.max(s, math.floor(cy - BASE - HOVER + 0.1)), h do
+  for layer = math.max(s, math.ceil(cy - BASE - HOVER - 0.05)), h do
     if not steady(wx, wz, BASE + layer + HOVER) then return false, "climb@" .. layer end
     local _, what = d.detect(0)
     if what ~= "solid" then                      -- 腳下那格還是空的才放
@@ -228,7 +222,8 @@ local function build_column(x, z, h, mats, cruise)
           if w == "solid" then break end
           ok, why = false, "side"
         end
-        computer.pullSignal(0.3)
+        computer.pullSignal(0.2)                 -- 失敗才多等一下：等停穩再重新對準
+        settle()
         steady(wx, wz, BASE + layer + HOVER)
       end
       if not ok then                             -- 失敗原因附上現場狀態，方便從失敗紀錄判斷
