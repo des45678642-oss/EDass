@@ -363,7 +363,7 @@ def t_place_probe():
     sim = MSim(solid, (4.5, 90.0, -109.5))
     sim.slots[1] = ["minecraft:stone", 64]
     sim.slots[2] = ["minecraft:stone", 64]
-    sim.run_probe(code, 81)
+    sim.run_probe(code, 81, 0.5)
     txt = "\n".join(str(r[3]) for r in sim.reports if r[2] == "PROBE")
     assert "ERROR" not in txt and any(r[2] == "PROBE_DONE" for r in sim.reports), txt
     assert "總結" in txt and "height" in txt, txt[-300:]
@@ -371,7 +371,7 @@ def t_place_probe():
     for line in txt.split("height")[1].splitlines():
         if line[:1] in "+-" and "T=" in line:
             h[float(line.split()[0])] = ("T=1" in line, "層=-1" in line)
-    assert h[-0.1][1] and h[-0.02][1] and not h[0.0][1] and h[0.12] == (True, False), h   # 比整數低一點就往下掉一層
+    assert h[-0.25][1] and not h[0.0][1] and h[0.5] == (True, False) and h[0.75] == (True, False), h   # 比整數低一點就往下掉一層
 
 
 def t_height_noise():

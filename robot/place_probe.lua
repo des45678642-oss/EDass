@@ -13,8 +13,8 @@ local t = component.proxy(component.list("tunnel")())
 local SLOTS = 8
 -- 實測：無人機的水平位置只會停在 0.25 的倍數，所以水平只測 0 / 0.25；高度另外一列測 (height)
 local OFFS = { 0, 0.25 }
-local DYS = { -0.1, -0.02, 0, 0.05, 0.12, 0.25, 0.4, 0.49 }      -- 高度偏移 (相對目標高度；負的 = 比整數高度低)
-local HOVER = 0.12                                                -- 水平測試時固定多抬高這麼多 (floor 才不會因為 -0.001 掉到下一格)
+local DYS = { -0.25, 0, 0.25, 0.5, 0.75 }      -- 高度偏移 (相對目標高度；位置只會停在 0.25 的倍數，每格只有 4 種高度)
+local HOVER = 0.5                              -- 水平測試時固定多抬高這麼多 (floor 才不會因為 -0.001 掉到下一格)；可用第 2 個參數改
 local MODES = { { "away", 1, 0 }, { "toward", -1, 0 }, { "perp", 0, 1 }, { "diag", 1, 1 }, { "height", 0, 0 } }
 local GAP = 4                                   -- 測試點之間隔幾格
 
@@ -57,7 +57,8 @@ end
 
 local function solid(side) local _, w = d.detect(side) return w == "solid" end
 
-local function run(gy)
+local function run(gy, hover)
+  HOVER = hover or HOVER
   local x0, y0, z0 = pos()
   local bx, bz = math.floor(x0) + 0.5, math.floor(z0) + 0.5     -- 起點所在格的中心
   local ALT = gy + 6
@@ -123,9 +124,9 @@ local function run(gy)
 end
 
 while true do
-  local sig, _, _, _, _, _, cmd, a1 = computer.pullSignal()
+  local sig, _, _, _, _, _, cmd, a1, a2 = computer.pullSignal()
   if sig == "modem_message" and cmd == "probe_place" then
-    local ok, err = pcall(run, tonumber(a1) or 81)
+    local ok, err = pcall(run, tonumber(a1) or 81, tonumber(a2))
     if not ok then report("PROBE", "ERROR " .. tostring(err):sub(1, 200)) report("PROBE_DONE") end
   end
 end
