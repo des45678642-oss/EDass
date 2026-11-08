@@ -43,6 +43,9 @@ class MSim(Sim):
         self.dbslots = {}                 # 資料庫項目 -> 材料名稱
         self.store_calls = 0
         self.place_fail = 0
+        self.lagdetect = False            # 剛移動完 5 tick 內 detect 會誤報 solid (實體位置還沒到位)
+        self.last_move = -99
+        self._lastp = None
         self.falls = []                   # 砂礫掉落排程 [剩餘 tick, 座標]
         self.fell = 0
         self.yjit = 0.0                   # 停穩時高度的隨機雜訊幅度 (實測 ±0.004)
@@ -58,6 +61,9 @@ class MSim(Sim):
                 self.gen_burn -= 1
                 self.energy = min(self.max_energy, self.energy + 8)
         super().tick()
+        if self._lastp != tuple(self.p):
+            self.last_move = self.ticks
+            self._lastp = tuple(self.p)
         for f in list(self.falls):
             f[0] -= 1
             if f[0] <= 0:
@@ -94,6 +100,8 @@ class MSim(Sim):
         return (math.floor(self.p[0]), math.floor(self.p[1] + self.ybias), math.floor(self.p[2]))
 
     def detect(self, side):
+        if self.lagdetect and self.ticks - self.last_move < 5:
+            return (True, "solid")
         dv = {0: (0, -1, 0), 1: (0, 1, 0), 2: (0, 0, -1), 3: (0, 0, 1), 4: (-1, 0, 0), 5: (1, 0, 0)}[side]
         cx, cy, cz = self.cell()
         c = (cx + dv[0], cy + dv[1], cz + dv[2])
@@ -406,6 +414,16 @@ def t_descend_blocked_not_silent():
     assert (bx, 82, bz) not in sim.blocks
 
 
+def t_detect_lag():
+    # 剛到位時 detect 可能誤報「已有方塊」：要等一下再確認，否則整層默默跳過
+    lines, expect, h = small_mountain()
+    sim = make_sim()
+    sim.lagdetect = True
+    sim.run([";".join(lines)], cruise=int(81 + h.max() + 4))
+    done, failed, rep = done_counts(sim)
+    assert failed == 0 and sim.blocks == expect, (failed, len(sim.blocks), len(expect))
+
+
 def t_gravel_fall():
     # 砂礫靠側邊方塊放得上去、但腳下是空的：2 tick 後會掉。要等一下確認，回報 fall，不重複亂放
     sim = make_sim()
@@ -520,6 +538,7 @@ test("盆地高原：亂序放不上去，規劃過的順序全部放得上去",
 test("放到旁邊不算成功：腳下沒方塊就回報失敗", t_stray_not_success)
 test("放置範圍測試程式：量出各偏移方向的最大成功偏移", t_place_probe)
 test("降不下去：回報 descend，不默默當成已蓋好", t_descend_blocked_not_silent)
+test("剛到位 detect 誤報 solid：等一下再確認，不默默跳過", t_detect_lag)
 test("砂礫腳下沒撐住：回報 fall，不重複亂放", t_gravel_fall)
 test("高度雜訊 ±0.004：不會放錯層", t_height_noise)
 test("資料庫由程式自己寫入：每種材料只寫一次", t_db_auto_setup)

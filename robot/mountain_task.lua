@@ -212,6 +212,10 @@ local function build_column(x, z, h, mats, cruise)
     local ok, off = yok(wx, wz, layer)
     if not ok then return false, "pos@" .. layer .. off end
     local _, what = d.detect(0)
+    if what == "solid" then                      -- 剛到位偵測可能看到的是還沒更新位置時的別格 (或鄰格)：說「已有方塊」要等一下再確認一次才信
+      computer.pullSignal(WAIT)
+      _, what = d.detect(0)
+    end
     if what ~= "solid" then                      -- 腳下那格還是空的才放
       local ok, why, slot = false, nil, nil
       for try = 1, 3 do                          -- 第一次 + 重試 2 次
