@@ -198,6 +198,17 @@ local function steady(wx, wz, wy)
   return align(wx, wz, wy) ~= false
 end
 
+-- 放置前確認高度在安全範圍：整數 +0.25 ~ +0.75 (低於整數會掉到下一層放錯層，超過下一個整數會算在上一層)
+local function yok(wx, wz, layer)
+  for _ = 1, 3 do
+    local _, cy = pos()
+    local dy = cy - BASE - layer
+    if dy >= 0.25 and dy <= 0.75 then return true end
+    align(wx, wz, BASE + layer + HOVER)
+  end
+  return false
+end
+
 -- 蓋一欄 (可重複執行：已經蓋好的層會跳過，所以失敗重試、續蓋、補蓋都安全)
 local function build_column(x, z, h, mats, cruise)
   local seq, s = parse(mats)
@@ -216,7 +227,7 @@ local function build_column(x, z, h, mats, cruise)
       for try = 1, 4 do
         slot = stock(seq[layer])
         d.select(slot)                           -- 每次都重新選：補燃料 / 補貨可能換掉了選取的槽
-        ok, why = d.place(0)
+        if yok(wx, wz, layer) then ok, why = d.place(0) else ok, why = false, "y" end
         if ok then
           local _, w = d.detect(0)               -- place 找不到目標會改放四周：確認腳下真的有方塊才算成功
           if w == "solid" then break end
