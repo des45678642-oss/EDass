@@ -32,6 +32,8 @@ local SLOTS = 8               -- 背包格數 (物品欄升級)；6 種材料可
 local FUEL_MIN = 8             -- 發電升級裡的燃料少於這個數量就補
 local WX0, WZ0, BASE = -200.5, -49.5, 82
 local MAXUP, LEG = 12, 30
+local HOVER = 0.25            -- 放置時停在整數高度上方這麼多 (實測位置只會停在 0.25 的倍數，且有 ±0.004 的雜訊：
+                           -- 停在剛好整數高度，約一半機率 floor 掉到下一層，方塊就放錯層)
 local HOP = 6                  -- 水平距離不超過這個就低空平移，超過就升到巡航高度
 local LOW_FRAC, RESUME_FRAC = 0.10, 0.30   -- 電量保險：低於 10% 懸停等充電，充到 30% 再動
 
@@ -210,10 +212,10 @@ local function build_column(x, z, h, mats, cruise)
   align(wx, wz)
   -- 往下走到殼起點；途中被已經蓋好的方塊擋住就停在它上面，從那一層接著看 (續蓋、補蓋都靠這個)
   local _, cy = pos()
-  go(0, BASE + s - cy, 0)
+  go(0, BASE + s + HOVER - cy, 0)
   _, cy = pos()
-  for layer = math.max(s, math.floor(cy - BASE + 0.1)), h do
-    if not steady(wx, wz, BASE + layer) then return false, "climb@" .. layer end
+  for layer = math.max(s, math.floor(cy - BASE - HOVER + 0.1)), h do
+    if not steady(wx, wz, BASE + layer + HOVER) then return false, "climb@" .. layer end
     local _, what = d.detect(0)
     if what ~= "solid" then                      -- 腳下那格還是空的才放
       local ok, why, slot = false, nil, nil
@@ -227,13 +229,13 @@ local function build_column(x, z, h, mats, cruise)
           ok, why = false, "side"
         end
         computer.pullSignal(0.3)
-        steady(wx, wz, BASE + layer)
+        steady(wx, wz, BASE + layer + HOVER)
       end
       if not ok then                             -- 失敗原因附上現場狀態，方便從失敗紀錄判斷
         local cx, cy2, cz = pos()
         local _, det = d.detect(0)
         return false, string.format("place@%d(%s%d %s y%+.2f x%+.2f z%+.2f e%.0f %s)", layer, seq[layer], d.count(slot),
-          tostring(det), cy2 - BASE - layer, cx - wx, cz - wz, computer.energy(), tostring(why):sub(1, 30))
+          tostring(det), cy2 - BASE - layer - HOVER, cx - wx, cz - wz, computer.energy(), tostring(why):sub(1, 30))
       end
     end
   end

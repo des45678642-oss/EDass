@@ -4,6 +4,7 @@
 用法: python run_mountain_tests.py [repo 路徑]   (需要 pip install lupa numpy)
 """
 import math
+import random
 import pathlib
 import sys
 
@@ -42,6 +43,8 @@ class MSim(Sim):
         self.dbslots = {}                 # 資料庫項目 -> 材料名稱
         self.store_calls = 0
         self.place_fail = 0
+        self.yjit = 0.0                   # 停穩時高度的隨機雜訊幅度 (實測 ±0.004)
+        self.ybias = 0.0                  # 導航回報的高度雜訊 (實測 ±0.004)：停在整數高度時 floor 會掉到下一層
         self.returned = 0                 # 還給 ME 的次數 (背包不夠時才會發生)
 
     def tick(self):
@@ -53,10 +56,12 @@ class MSim(Sim):
                 self.gen_burn -= 1
                 self.energy = min(self.max_energy, self.energy + 8)
         super().tick()
+        if self.yjit and math.dist(self.p, self.target) < 1e-9:
+            self.p[1] += random.Random(self.ticks).uniform(-self.yjit, self.yjit)
 
     def mplace(self):
         item, cnt = self.slots[self.sel]
-        x, y, z = (math.floor(c) for c in self.p)
+        x, y, z = self.cell()
         tgt = (x, y - 1, z)
         if cnt <= 0 or tgt in self.solid:
             self.place_fail += 1
@@ -75,9 +80,13 @@ class MSim(Sim):
         self.slots[self.sel][1] -= 1
         return True
 
+    def cell(self):
+        return (math.floor(self.p[0]), math.floor(self.p[1] + self.ybias), math.floor(self.p[2]))
+
     def detect(self, side):
         dv = {0: (0, -1, 0), 1: (0, 1, 0), 2: (0, 0, -1), 3: (0, 0, 1), 4: (-1, 0, 0), 5: (1, 0, 0)}[side]
-        c = (math.floor(self.p[0]) + dv[0], math.floor(self.p[1]) + dv[1], math.floor(self.p[2]) + dv[2])
+        cx, cy, cz = self.cell()
+        c = (cx + dv[0], cy + dv[1], cz + dv[2])
         return (True, "solid") if c in self.solid else (False, "air")
 
     def install(self, lua):
@@ -140,7 +149,7 @@ class MSim(Sim):
                 "place": lambda side=0: sim.mplace(),
                 "detect": lambda side=0: sim.detect(int(side)),
             }),
-            "navigation": lua.table_from({"getPosition": lambda: tuple(sim.p), "getRange": lambda: 1e9}),
+            "navigation": lua.table_from({"getPosition": lambda: (sim.p[0], sim.p[1] + sim.ybias, sim.p[2]), "getRange": lambda: 1e9}),
             "tunnel": lua.table_from({"send": lambda *a: sim.send(a)}),
             "generator": lua.table_from({"count": lambda: sim.gen_count, "insert": gen_insert}),
             "upgrade_me": lua.table_from({"requestItems": request, "sendItems": send_items, "store": store}),
@@ -365,6 +374,16 @@ def t_place_probe():
     assert h[-0.1][1] and h[-0.02][1] and not h[0.0][1] and h[0.12] == (True, False), h   # 比整數低一點就往下掉一層
 
 
+def t_height_noise():
+    # 導航高度有 ±0.004 的雜訊：停在剛好整數高度會有一半放錯層；程式停在整數 + 0.25 就不受影響
+    lines, expect, h = small_mountain()
+    sim = make_sim()
+    sim.yjit = 0.004
+    sim.run([";".join(lines)], cruise=int(81 + h.max() + 4))
+    done, failed, rep = done_counts(sim)
+    assert failed == 0 and sim.blocks == expect, (failed, len(sim.blocks), len(expect))
+
+
 def t_db_auto_setup():
     lines, expect, h = small_mountain()
     sim = make_sim()
@@ -466,6 +485,7 @@ test("無法抵達的欄：記錄失敗，其餘繼續", t_blocked_column)
 test("盆地高原：亂序放不上去，規劃過的順序全部放得上去", t_basin_needs_plan)
 test("放到旁邊不算成功：腳下沒方塊就回報失敗", t_stray_not_success)
 test("放置範圍測試程式：量出各偏移方向的最大成功偏移", t_place_probe)
+test("高度雜訊 ±0.004：不會放錯層", t_height_noise)
 test("資料庫由程式自己寫入：每種材料只寫一次", t_db_auto_setup)
 test("ME 網路沒有某材料：回報 ERROR 並指出材料名稱", t_missing_material)
 test("沒裝攝影機：照樣蓋得出來", t_no_camera)
