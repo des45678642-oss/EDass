@@ -21,7 +21,7 @@ local g = component.proxy(component.list("generator")() or "")
 local ENTRY = { S = 1, T = 2, C = 3, N = 4, G = 5, D = 6, F = 7 }   -- 各材料用的資料庫項目編號
 local ITEM = {                                                   -- 各材料的 ME 過濾條件 (1.7.10 名稱)
   S = { name = "minecraft:stone", damage = 0 },                 -- 石頭
-  T = { name = "minecraft:stained_hardened_clay", damage = 7 },  -- 灰色陶瓦
+  T = { name = "minecraft:stained_hardened_clay", damage = 9 },  -- 青色陶瓦
   C = { name = "minecraft:cobblestone", damage = 0 },           -- 鵝卵石
   N = { name = "minecraft:snow", damage = 0 },                  -- 雪 (方塊)
   G = { name = "minecraft:gravel", damage = 0 },                -- 砂礫
@@ -230,6 +230,11 @@ local function build_column(x, z, h, mats, cruise)
         if yok(wx, wz, layer) then ok, why = d.place(0) else ok, why = false, "y" end
         if ok then
           local _, w = d.detect(0)               -- place 找不到目標會改放四周：確認腳下真的有方塊才算成功
+          if w == "solid" and seq[layer] == "G" then   -- 砂礫放下去 2 tick 後才會掉：等一下再確認，沒撐住就不要再放 (重放只會讓砂礫一顆顆掉下去)
+            computer.pullSignal(0.3)
+            _, w = d.detect(0)
+            if w ~= "solid" then return false, "fall@" .. layer end
+          end
           if w == "solid" then break end
           ok, why = false, "side"
         end
@@ -240,8 +245,8 @@ local function build_column(x, z, h, mats, cruise)
       if not ok then                             -- 失敗原因附上現場狀態，方便從失敗紀錄判斷
         local cx, cy2, cz = pos()
         local _, det = d.detect(0)
-        return false, string.format("place@%d(%s%d %s y%+.2f x%+.2f z%+.2f e%.0f %s)", layer, seq[layer], d.count(slot),
-          tostring(det), cy2 - BASE - layer - HOVER, cx - wx, cz - wz, computer.energy(), tostring(why):sub(1, 30))
+        return false, string.format("place@%d(%s%d %s y%+.2f x%+.2f z%+.2f %s)", layer, seq[layer], d.count(slot),
+          det, cy2 - BASE - layer - HOVER, cx - wx, cz - wz, why)
       end
     end
   end

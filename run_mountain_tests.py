@@ -43,6 +43,8 @@ class MSim(Sim):
         self.dbslots = {}                 # 資料庫項目 -> 材料名稱
         self.store_calls = 0
         self.place_fail = 0
+        self.falls = []                   # 砂礫掉落排程 [剩餘 tick, 座標]
+        self.fell = 0
         self.yjit = 0.0                   # 停穩時高度的隨機雜訊幅度 (實測 ±0.004)
         self.ybias = 0.0                  # 導航回報的高度雜訊 (實測 ±0.004)：停在整數高度時 floor 會掉到下一層
         self.returned = 0                 # 還給 ME 的次數 (背包不夠時才會發生)
@@ -56,6 +58,12 @@ class MSim(Sim):
                 self.gen_burn -= 1
                 self.energy = min(self.max_energy, self.energy + 8)
         super().tick()
+        for f in list(self.falls):
+            f[0] -= 1
+            if f[0] <= 0:
+                self.falls.remove(f)
+                if (f[1][0], f[1][1] - 1, f[1][2]) not in self.solid:      # 腳下沒東西：砂礫掉下去 (方塊消失)
+                    self.solid.discard(f[1]); self.blocks.pop(f[1], None); self.fell += 1
         if self.yjit and math.dist(self.p, self.target) < 1e-9:
             self.p[1] += random.Random(self.ticks).uniform(-self.yjit, self.yjit)
 
@@ -78,6 +86,8 @@ class MSim(Sim):
         self.solid.add(tgt)
         self.blocks[tgt] = item
         self.slots[self.sel][1] -= 1
+        if item == "minecraft:gravel":
+            self.falls.append([2, tgt])                  # 2 tick 後才會掉
         return True
 
     def cell(self):
@@ -384,6 +394,18 @@ def t_height_noise():
     assert failed == 0 and sim.blocks == expect, (failed, len(sim.blocks), len(expect))
 
 
+def t_gravel_fall():
+    # 砂礫靠側邊方塊放得上去、但腳下是空的：2 tick 後會掉。要等一下確認，回報 fall，不重複亂放
+    sim = make_sim()
+    bx, bz = math.floor(-200.5 + 5), math.floor(-49.5 - 5)
+    sim.solid.add((bx + 1, 84, bz))                    # 第 3 層 (Y=84) 旁邊有方塊可當側邊支撐
+    sim.slots[1] = ["minecraft:gravel", 64]
+    sim.run(["5 5 3 _2G1"], cruise=100)
+    done, failed, rep = done_counts(sim)
+    assert failed == 1 and "fall@3" in rep[0][6], (done, failed, [r[6] for r in rep])
+    assert (bx, 84, bz) not in sim.blocks and sim.fell == 2, (sim.fell, list(sim.blocks))   # 掉下去的不留；整批結束後補蓋一次，共放 2 顆
+
+
 def t_db_auto_setup():
     lines, expect, h = small_mountain()
     sim = make_sim()
@@ -485,6 +507,7 @@ test("無法抵達的欄：記錄失敗，其餘繼續", t_blocked_column)
 test("盆地高原：亂序放不上去，規劃過的順序全部放得上去", t_basin_needs_plan)
 test("放到旁邊不算成功：腳下沒方塊就回報失敗", t_stray_not_success)
 test("放置範圍測試程式：量出各偏移方向的最大成功偏移", t_place_probe)
+test("砂礫腳下沒撐住：回報 fall，不重複亂放", t_gravel_fall)
 test("高度雜訊 ±0.004：不會放錯層", t_height_noise)
 test("資料庫由程式自己寫入：每種材料只寫一次", t_db_auto_setup)
 test("ME 網路沒有某材料：回報 ERROR 並指出材料名稱", t_missing_material)

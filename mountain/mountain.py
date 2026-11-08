@@ -33,7 +33,7 @@ MAX_Y = GROUND_Y + 128             # 建築高度上限 (地面 +128 = Y 209)
 BITE_CX, BITE_CZ, BITE_R = 208, 304, 200 * 0.55   # 小圓 (月牙缺口) 的幾何，與 lake.py 相同
 LAKE_BLOCKS, LAKE_COLUMNS = 323291, 82915
 LAKE_SECONDS = 7 * 24 * 3600       # 湖大約一週
-MATERIALS = {"S": "石頭", "T": "灰色陶瓦", "C": "鵝卵石", "N": "雪", "G": "砂礫", "D": "泥土"}
+MATERIALS = {"S": "石頭", "T": "青色陶瓦", "C": "鵝卵石", "N": "雪", "G": "砂礫", "D": "泥土"}
 
 
 def w2m(wx, wz):
