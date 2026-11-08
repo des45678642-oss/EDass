@@ -7,7 +7,7 @@ local SERVER_PORT, TAG = 100, "C"
 local args = { ... }
 modem.open(SERVER_PORT)
 modem.broadcast(SERVER_PORT, "SERVER_CMD", TAG, "probe_place", tonumber(args[1]) or 81)
-print("已送出 probe_place (通道 " .. TAG .. ")，無人機會先蓋 24 根石柱再逐點測試，需要幾分鐘…")
+print("已送出 probe_place (通道 " .. TAG .. ")，無人機會先蓋 16 根石柱再逐點測試，需要幾分鐘…")
 local out = io.open("place_probe_result.txt", "w")
 while true do
   local raw = { event.pull(300, "modem_message") }

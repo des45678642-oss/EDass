@@ -357,18 +357,12 @@ def t_place_probe():
     sim.run_probe(code, 81)
     txt = "\n".join(str(r[3]) for r in sim.reports if r[2] == "PROBE")
     assert "ERROR" not in txt and any(r[2] == "PROBE_DONE" for r in sim.reports), txt
-    rows = {}
-    cur = None
-    for line in txt.splitlines():
-        if line.split(" ")[0] in ("away", "toward", "perp", "diag"):
-            cur = line.split(" ")[0]
-        elif cur and line[:1].isdigit():
-            rows.setdefault(cur, []).append((float(line.split()[0]), "T=1" in line))
-    # 模擬器的規則：遠離支撐 0.15 以內放得上去，超過放不上去；靠近支撐一律放得上去
-    a = dict(rows["away"])                                    # 0.15 剛好在邊界上 (浮點誤差)，不驗證
-    assert a[0.0] and a[0.1] and not a[0.2] and not a[0.3] and not a[0.45], a
-    assert all(v for _, v in rows["toward"]), rows["toward"]
-    assert "總結" in txt, txt[-300:]
+    assert "總結" in txt and "height" in txt, txt[-300:]
+    h = {}
+    for line in txt.split("height")[1].splitlines():
+        if line[:1] in "+-" and "T=" in line:
+            h[float(line.split()[0])] = ("T=1" in line, "層=-1" in line)
+    assert h[-0.1][1] and h[-0.02][1] and not h[0.0][1] and h[0.12] == (True, False), h   # 比整數低一點就往下掉一層
 
 
 def t_db_auto_setup():
