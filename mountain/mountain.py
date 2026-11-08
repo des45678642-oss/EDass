@@ -278,7 +278,7 @@ def shell_start(h, t):
     return np.clip(start, 1, None)
 
 
-def assign_materials(h, seed=11, interior="S", shell=0):
+def assign_materials(h, seed=11, interior="S", shell=0, start=None):
     """每欄回傳由下往上的材質串。只有看得到的層 (比任一鄰欄高的部分、頂面) 才挑表面材質，其餘一律 interior；
     shell > 0 時，殼以內的空心部分用 "_" 表示 (不用蓋)。砂礫只出現在頂面，下面一定有實心層墊著，不會掉。"""
     rng = np.random.default_rng(seed)
@@ -290,7 +290,8 @@ def assign_materials(h, seed=11, interior="S", shell=0):
     nb_min = np.minimum.reduce([hp[:-2, 1:-1], hp[2:, 1:-1], hp[1:-1, :-2], hp[1:-1, 2:]])
     nb_max = np.maximum.reduce([hp[:-2, 1:-1], hp[2:, 1:-1], hp[1:-1, :-2], hp[1:-1, 2:]])
     hmax = max(1, int(h.max()))
-    start = shell_start(h, shell)
+    if start is None:
+        start = shell_start(h, shell)
     cols, totals = {}, dict.fromkeys(MATERIALS, 0)
     top_mat = np.full((nz, nx), "", dtype="<U1")
     for cz, cx in zip(*np.nonzero(h)):
@@ -318,6 +319,8 @@ def assign_materials(h, seed=11, interior="S", shell=0):
                 m = "D"                                         # 低處用泥土
             if top and flat and rel >= 0.77 + 0.17 * l1:
                 m = "N"
+            if top and m == "G" and hh - st + 1 < 2:
+                m = "S"                                         # 殼只剩一層：砂礫下面沒有東西墊著會掉，改石頭
             seq.append(m)
         top_mat[cz, cx] = seq[-1]
         runs, prev, cnt = [], seq[0], 0
@@ -332,6 +335,80 @@ def assign_materials(h, seed=11, interior="S", shell=0):
         runs.append(f"{prev}{cnt}")
         cols[(cz, cx)] = "".join(runs)
     return cols, totals, top_mat, start
+
+
+def plan_support(h, start, pts, center=(208, 208), cv=None, band=24):
+    """決定一台無人機的「殼起點」與施工順序，保證每一欄的第一塊都放得上去。
+
+    OC 的放置規則：目標格的鄰格 (腳下、四個側邊) 有方塊就放得上去。一欄的殼是 start..h 一路蓋到頂，
+    第一塊 (start 層) 的支撐只可能是：start==1 (腳下是地面)，或鄰欄在同一層已有方塊 (鄰欄 start' <= start <= h')。
+    殼的底面如果有「凹坑」(鄰欄的底都比它高)，坑底那塊就沒有支撐，所以把坑填到溢出高度 (priority-flood)：
+    填完後每欄都有一個起點不比自己高的鄰欄，沿著它一路走一定會走到地面。
+    只看本台自己負責的欄，不依賴別台 (別台蓋的進度不一定同步)。
+
+    回傳 (新起點 dict, 施工順序 list, 無法支撐 list)。"""
+    import heapq
+    mine = set(pts)
+    fill, done = {}, set()
+    pq = []
+    for p in pts:
+        if start[p] <= 1:
+            fill[p] = 1
+            heapq.heappush(pq, (1, p))
+    parent = {}
+    while pq:
+        lv, p = heapq.heappop(pq)
+        if p in done:
+            continue
+        done.add(p)
+        for dz, dx in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+            n = (p[0] + dz, p[1] + dx)
+            if n in mine and n not in done:
+                v = max(int(start[n]), lv)
+                if n not in fill or v < fill[n]:
+                    fill[n] = v
+                    parent[n] = p
+                    heapq.heappush(pq, (v, n))
+    bad = [p for p in pts if p not in done or fill[p] > h[p]]
+    ok = [p for p in pts if p in done and fill[p] <= h[p]]
+
+    def ang(p):
+        if cv is not None:
+            return math.atan2(cv.zm(p[0]) - center[0], cv.xm(p[1]) - center[1])
+        return math.atan2(p[0] - center[0], p[1] - center[1])
+
+    # 由低到高分帶 (每帶 BAND 層) 蓋；同一帶內用蛇形列序掃描，還沒有接點的欄先跳過、下一輪再回來。
+    # (逐層嚴格由低到高路徑太長；整座山一輪掃完又要掃好幾百輪，所以折衷成分帶。)
+    bands = {}
+    for p in ok:
+        bands.setdefault((fill[p] - 1) // band, []).append(p)
+    built, order = set(), []
+
+    def can(p):
+        if fill[p] <= 1:
+            return True
+        for dz, dx in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+            n = (p[0] + dz, p[1] + dx)
+            if n in built and fill[n] <= fill[p] <= h[n]:
+                return True
+        return False
+
+    for b in sorted(bands):
+        todo = sorted(bands[b], key=lambda p: (p[0], p[1] if p[0] % 2 == 0 else -p[1]))
+        while todo:
+            nxt = []
+            for p in todo:
+                if can(p):
+                    built.add(p)
+                    order.append(p)
+                else:
+                    nxt.append(p)
+            if len(nxt) == len(todo):            # 這一帶剩下的都接不上：留給「無法支撐」
+                bad.extend(nxt)
+                break
+            todo = nxt
+    new_start = {p: fill[p] for p in order}
+    return new_start, order, bad
 
 
 def split_for_drones(h, cv, cols, parts=3, start=None):
@@ -496,9 +573,24 @@ def main():
     out = pathlib.Path(a.out)
     out.mkdir(parents=True, exist_ok=True)
     h.tofile(out / "mountain_map.bin")
-    cols, totals, top_mat, start = assign_materials(h, interior=a.interior, shell=a.shell)
-    blocks = shell_blocks(h, a.shell)
-    groups = split_for_drones(h, cv, cols, a.drones, start)
+    start0 = shell_start(h, a.shell)
+    pts_all = [(int(z), int(x)) for z, x in zip(*np.nonzero(h))]
+    groups = split_for_drones(h, cv, {p: "" for p in pts_all}, a.drones, start0)
+    start = start0.copy()
+    bad_all = 0
+    if a.shell > 0:
+        new_groups = []
+        for pts in groups:
+            ns, order, bad = plan_support(h, start0, pts, cv=cv)
+            for p, v in ns.items():
+                start[p] = v
+            for p in bad:                       # 理論上很少；先保守地蓋成實心 (從地面疊上去)，並回報數量
+                start[p] = 1
+            bad_all += len(bad)
+            new_groups.append(order + list(bad))
+        groups = new_groups
+    cols, totals, top_mat, start = assign_materials(h, interior=a.interior, shell=a.shell, start=start)
+    blocks = int((h.astype(np.int64)[h > 0] - start[h > 0] + 1).sum())
     files = []
     for g, pts in enumerate(groups):
         name = f"mountain_cols_{'ABC'[g]}.txt"
@@ -517,6 +609,9 @@ def main():
 
     print(f"畫布 {cv.nx}×{cv.nz}（左右外擴 {cv.ox}、南側外擴 {cv.oz}）| 欄數 {cols_n:,}")
     print(f"實心 {solid_blocks:,} 方塊 → 殼厚 {a.shell}：{blocks:,} 方塊（湖的 {blocks / LAKE_BLOCKS:.1f}×，省 {100 * (1 - blocks / solid_blocks):.0f}%）")
+    if a.shell > 0:
+        thin = int(((h > 0) & (h - start + 1 < 2)).sum())
+        print(f"殼支撐規劃：凹坑填平後殼只剩 1 層的欄 {thin:,}；沒有任何可接鄰欄而改蓋實心的欄 {bad_all:,}")
     print(f"最高頂面 Y={GROUND_Y + top} | 相鄰最大落差 {max_step(h)} | 無人機巡航高度至少 Y={GROUND_Y + top + 3}"
           + (f" | 既有地形 {info['existing_cells']:,} 欄" if scan is not None else ""))
     print("材質用量:", "、".join(f"{MATERIALS[k]} {v:,}（{v / 64:,.0f} 組）" for k, v in totals.items()))
