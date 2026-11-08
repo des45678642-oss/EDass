@@ -188,18 +188,16 @@ local function align(wx, wz, wy)
 end
 
 -- 對準到欄中心的上方 (水平偏差要 0，垂直有 ±0.25 的餘量，不用特別等停穩、也不用從上方接近)
-local function steady(wx, wz, wy)
-  local ok = align(wx, wz, wy) ~= false
-  if d.getVelocity() > 0.02 then settle() end   -- 剛移動完還在飄：多半是「每層第一格」放不上去的原因 (實測連續同一種材料、沒有換槽的延遲時最明顯)
-  return ok
-end
-
--- 放置前確認高度在安全範圍：整數 +0.3 ~ +0.6 (低於整數會掉到下一層放錯層；實測太高有時會放到奇怪的位置)
+-- 放置 / 偵測前確認位置：水平要在這欄正上方 (差超過一格就會把別欄當成這欄、整欄默默漏掉)，
+-- 高度要在整數 +0.3 ~ +0.6 (低於整數會掉到下一層放錯層；實測太高有時會放到奇怪的位置)
 local function yok(wx, wz, layer)
   for _ = 1, 3 do
-    local _, cy = pos()
+    local cx, cy, cz = pos()
     local dy = cy - BASE - layer
-    if dy >= 0.3 and dy <= 0.6 then return true end
+    if dy >= 0.3 and dy <= 0.6 and math.abs(cx - wx) < 0.13 and math.abs(cz - wz) < 0.13 then
+      settle()                                   -- 位置對了還在飄就等一下 (已經停穩會馬上回來)
+      return true
+    end
     align(wx, wz, BASE + layer + HOVER)
   end
   return false
@@ -215,15 +213,16 @@ local function build_column(x, z, h, mats, cruise)
   local _, cy = pos()
   go(0, BASE + s + HOVER - cy, 0)
   _, cy = pos()
+  if cy > BASE + h + 1.5 then return false, "descend" end   -- 沒降下來 (不是被這欄已蓋的方塊擋住)：不能當成已蓋好
   for layer = math.max(s, math.ceil(cy - BASE - HOVER - 0.05)), h do
-    if not steady(wx, wz, BASE + layer + HOVER) then return false, "climb@" .. layer end
+    if not yok(wx, wz, layer) then return false, "pos@" .. layer end
     local _, what = d.detect(0)
     if what ~= "solid" then                      -- 腳下那格還是空的才放
       local ok, why, slot = false, nil, nil
       for try = 1, 4 do
         slot = stock(seq[layer])
         d.select(slot)                           -- 每次都重新選：補燃料 / 補貨可能換掉了選取的槽
-        if yok(wx, wz, layer) then ok, why = d.place(0) else ok, why = false, "y" end
+        ok, why = d.place(0)
         if ok then
           local _, w = d.detect(0)               -- place 找不到目標會改放四周：確認腳下真的有方塊才算成功
           if w == "solid" and seq[layer] == "G" then   -- 砂礫放下去 2 tick 後才會掉：等一下再確認，沒撐住就不要再放 (重放只會讓砂礫一顆顆掉下去)
@@ -235,8 +234,7 @@ local function build_column(x, z, h, mats, cruise)
           ok, why = false, "side"
         end
         computer.pullSignal(0.2)                 -- 失敗才多等一下：等停穩再重新對準
-        settle()
-        steady(wx, wz, BASE + layer + HOVER)
+        yok(wx, wz, layer)
       end
       if not ok then                             -- 失敗原因附上現場狀態，方便從失敗紀錄判斷
         local cx, cy2, cz = pos()

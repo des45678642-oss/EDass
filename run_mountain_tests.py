@@ -394,6 +394,18 @@ def t_height_noise():
     assert failed == 0 and sim.blocks == expect, (failed, len(sim.blocks), len(expect))
 
 
+def t_descend_blocked_not_silent():
+    # 降到一半被「不是這欄自己的」東西擋住：以前會因為起始層超過欄高而整欄默默跳過、還回報成功；現在要回報失敗
+    sim = make_sim()
+    bx, bz = math.floor(-200.5 + 5), math.floor(-49.5 - 5)
+    sim.solid.add((bx, 100, bz))                      # 欄正上方飄著一個方塊
+    sim.slots[1] = ["minecraft:dirt", 64]
+    sim.run(["5 5 1 D1"], cruise=130)
+    done, failed, rep = done_counts(sim)
+    assert failed == 1 and done == 0 and "descend" in rep[0][6], (done, failed, [r[6] for r in rep])
+    assert (bx, 82, bz) not in sim.blocks
+
+
 def t_gravel_fall():
     # 砂礫靠側邊方塊放得上去、但腳下是空的：2 tick 後會掉。要等一下確認，回報 fall，不重複亂放
     sim = make_sim()
@@ -507,6 +519,7 @@ test("無法抵達的欄：記錄失敗，其餘繼續", t_blocked_column)
 test("盆地高原：亂序放不上去，規劃過的順序全部放得上去", t_basin_needs_plan)
 test("放到旁邊不算成功：腳下沒方塊就回報失敗", t_stray_not_success)
 test("放置範圍測試程式：量出各偏移方向的最大成功偏移", t_place_probe)
+test("降不下去：回報 descend，不默默當成已蓋好", t_descend_blocked_not_silent)
 test("砂礫腳下沒撐住：回報 fall，不重複亂放", t_gravel_fall)
 test("高度雜訊 ±0.004：不會放錯層", t_height_noise)
 test("資料庫由程式自己寫入：每種材料只寫一次", t_db_auto_setup)
