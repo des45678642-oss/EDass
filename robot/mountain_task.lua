@@ -17,8 +17,6 @@ local t = component.proxy(component.list("tunnel")())
 local me = component.proxy(component.list("upgrade_me")() or "")
 local db = component.proxy(component.list("database")() or "")
 local g = component.proxy(component.list("generator")() or "")
-local ca = component.list("camera")()
-local cam = ca and component.proxy(ca)
 
 local ENTRY = { S = 1, T = 2, C = 3, N = 4, G = 5, D = 6, F = 7 }   -- 各材料用的資料庫項目編號
 local ITEM = {                                                   -- 各材料的 ME 過濾條件 (1.7.10 名稱)
@@ -59,20 +57,6 @@ local function pos()
   return x or 0, y or BASE, z or 0
 end
 
--- 攝影機：中心 + 上下左右各偏一點取最近距離；垂直移動只看正中間 (斜射的光線會打到旁邊更高的方塊)
-local O = { { 0, 0 }, { .1, 0 }, { -.1, 0 }, { 0, .1 }, { 0, -.1 } }
-local function probe(f, bx, by, narrow)
-  if not cam then return math.huge end
-  local m = math.huge
-  for k, o in ipairs(O) do
-    if not narrow or k == 1 then
-      local r = f(math.max(-1, math.min(1, (bx or 0) + o[1])), (by or 0) + o[2])
-      if r and r >= 0 and r < m then m = r end
-    end
-  end
-  return m
-end
-
 local function go(dx, dy, dz)
   refuel()
   local sx, sy, sz = pos()
@@ -94,8 +78,6 @@ end
 
 local function vert(dy)
   if math.abs(dy) < 0.05 then return true end
-  local f = cam and (dy > 0 and cam.distanceUp or cam.distanceDown)
-  if f and probe(f, 0, 0, true) < math.abs(dy) + 0.5 then return false end
   return go(0, dy, 0)
 end
 
@@ -107,11 +89,7 @@ local function fly(tx, tz)
     local dist = math.sqrt(dx * dx + dz * dz)
     if dist < 0.1 then return true end
     local leg = math.min(dist, LEG)
-    if cam and dz > 0 and math.abs(dx) <= dz then
-      local free = probe(cam.distance, -dx / dz, 0)
-      if free < leg + 0.5 then leg = free - 1 end
-    end
-    if leg < 0.5 or not go(dx * leg / dist, 0, dz * leg / dist) then
+    if not go(dx * leg / dist, 0, dz * leg / dist) then
       climbed = climbed + 2
       if climbed > MAXUP or not vert(2) then return false end
     end
@@ -193,10 +171,11 @@ local function travel(wx, wz, ty, cruise)
 end
 
 -- 對準欄位正中心：放置的射線只比目標格多伸進鄰格 0.15 格，偏離超過這個就會打空
-local function align(wx, wz)
-  local cx, _, cz = pos()
-  local dx, dz = wx - cx, wz - cz
-  if math.abs(dx) > 0.03 or math.abs(dz) > 0.03 then go(dx, 0, dz) end
+local function align(wx, wz, wy)
+  local cx, cy, cz = pos()
+  local dx, dy, dz = wx - cx, (wy or cy) - cy, wz - cz
+  if math.abs(dx) > 0.03 or math.abs(dy) > 0.03 or math.abs(dz) > 0.03 then return go(dx, dy, dz) end
+  return true
 end
 
 -- 蓋一欄 (可重複執行：已經蓋好的層會跳過，所以失敗重試、續蓋、補蓋都安全)
@@ -216,15 +195,21 @@ local function build_column(x, z, h, mats, cruise)
     if what ~= "solid" then                      -- 腳下那格還是空的才放
       _, cy = pos()
       if math.abs(cy - (BASE + layer)) > 0.05 and not go(0, BASE + layer - cy, 0) then return false, "climb@" .. layer end
-      d.select(stock(seq[layer]))
-      local ok = false
-      for try = 1, 3 do
-        ok = d.place(0)
+      local ok, why, slot = false, nil, nil
+      for try = 1, 4 do
+        slot = stock(seq[layer])
+        d.select(slot)                           -- 每次都重新選：補燃料 / 補貨可能換掉了選取的槽
+        ok, why = d.place(0)
         if ok then break end
-        computer.pullSignal(0.3)                 -- 失敗：等一下、重新對準再試 (鄰欄的方塊可能剛放好還沒更新)
-        align(wx, wz)
+        computer.pullSignal(0.3)                 -- 失敗：等一下，水平和高度都重新對準再試
+        align(wx, wz, BASE + layer)
       end
-      if not ok then return false, "place@" .. layer end
+      if not ok then                             -- 失敗原因附上現場狀態，方便從失敗紀錄判斷
+        local cx, cy2, cz = pos()
+        local _, det = d.detect(0)
+        return false, string.format("place@%d(%s%d %s y%+.2f x%+.2f z%+.2f e%.0f %s)", layer, seq[layer], d.count(slot),
+          tostring(det), cy2 - BASE - layer, cx - wx, cz - wz, computer.energy(), tostring(why):sub(1, 30))
+      end
     end
   end
   return true
