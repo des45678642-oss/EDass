@@ -171,6 +171,13 @@ local function travel(wx, wz, ty, cruise)
 end
 
 -- 對準欄位正中心：放置的射線只比目標格多伸進鄰格 0.15 格，偏離超過這個就會打空
+local function settle()                    -- 等無人機真的停穩 (到位 != 停穩，還在飄的時候射線會偏)
+  for _ = 1, 30 do
+    if d.getVelocity() < 0.02 then return end
+    computer.pullSignal(0.05)
+  end
+end
+
 local function align(wx, wz, wy)
   local cx, cy, cz = pos()
   local dx, dy, dz = wx - cx, (wy or cy) - cy, wz - cz
@@ -199,6 +206,7 @@ local function build_column(x, z, h, mats, cruise)
       for try = 1, 4 do
         slot = stock(seq[layer])
         d.select(slot)                           -- 每次都重新選：補燃料 / 補貨可能換掉了選取的槽
+        settle()
         ok, why = d.place(0)
         if ok then break end
         computer.pullSignal(0.3)                 -- 失敗：等一下，水平和高度都重新對準再試
