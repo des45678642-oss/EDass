@@ -173,15 +173,9 @@ local function travel(wx, wz, ty, cruise)
 end
 
 -- 對準欄位正中心：放置的射線只比目標格多伸進鄰格 0.15 格，偏離超過這個就會打空
-local function settle()                    -- 等無人機真的停穩：連續 3 次速度都幾乎為 0 (到位 != 停穩，還在飄的時候射線會偏)
-  local calm = 0
-  for _ = 1, 60 do
-    if d.getVelocity() < 0.01 then
-      calm = calm + 1
-      if calm >= 3 then return end
-    else
-      calm = 0
-    end
+local function settle()                    -- 等無人機停穩 (到位 != 停穩，還在飄的時候射線會偏)；最多等 2 秒
+  for _ = 1, 40 do
+    if d.getVelocity() < 0.02 then return end
     computer.pullSignal(0.05)
   end
 end
@@ -195,7 +189,9 @@ end
 
 -- 對準到欄中心的上方 (水平偏差要 0，垂直有 ±0.25 的餘量，不用特別等停穩、也不用從上方接近)
 local function steady(wx, wz, wy)
-  return align(wx, wz, wy) ~= false
+  local ok = align(wx, wz, wy) ~= false
+  if d.getVelocity() > 0.02 then settle() end   -- 剛移動完還在飄：多半是「每層第一格」放不上去的原因 (實測連續同一種材料、沒有換槽的延遲時最明顯)
+  return ok
 end
 
 -- 放置前確認高度在安全範圍：整數 +0.3 ~ +0.6 (低於整數會掉到下一層放錯層；實測太高有時會放到奇怪的位置)
