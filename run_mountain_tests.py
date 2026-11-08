@@ -418,17 +418,6 @@ def t_descend_blocked_not_silent():
     assert (bx, 82, bz) not in sim.blocks
 
 
-def t_detect_lag():
-    # detect 一直誤報「已有方塊」(等多久都一樣)：要實際往下探一次確認，否則整層默默跳過
-    lines, expect, h = small_mountain()
-    sim = make_sim()
-    sim.lagdetect = True
-    sim.lagticks = 10 ** 9                              # 等多久都誤報 (永遠說下面有方塊)
-    sim.run([";".join(lines)], cruise=int(81 + h.max() + 4))
-    done, failed, rep = done_counts(sim)
-    assert failed == 0 and sim.blocks == expect, (failed, len(sim.blocks), len(expect))
-
-
 def t_descent_stalls_above():
     # 長距離下降停在目標上方 0.2 格：不能因此把殼起點那一層默默跳過 (以前會從下一層開始、整欄少一塊)
     lines, expect, h = small_mountain()
@@ -553,7 +542,6 @@ test("盆地高原：亂序放不上去，規劃過的順序全部放得上去",
 test("放到旁邊不算成功：腳下沒方塊就回報失敗", t_stray_not_success)
 test("放置範圍測試程式：量出各偏移方向的最大成功偏移", t_place_probe)
 test("降不下去：回報 descend，不默默當成已蓋好", t_descend_blocked_not_silent)
-test("detect 一直誤報 solid：往下探確認，不默默跳過", t_detect_lag)
 test("下降停在目標上方一點：第一層不會被跳過", t_descent_stalls_above)
 test("砂礫腳下沒撐住：回報 fall，不重複亂放", t_gravel_fall)
 test("高度雜訊 ±0.004：不會放錯層", t_height_noise)

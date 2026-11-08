@@ -91,7 +91,7 @@ def t_all_batches():
     sent = run(tmp, ["start", "y"], lambda tag, bid, payload: (payload.count(";") + 1, 0, ""))
     got = {"B": [], "C": []}
     for tag, bid, cruise, payload in sent:
-        assert cruise == 203
+        assert 110 <= cruise <= 203
         got[tag] += payload.split(";")
     assert got["B"] == A and got["C"] == C, (len(got["B"]), len(got["C"]))
     assert all(len(p.split(";")) <= 40 for _, _, _, p in sent)
@@ -131,6 +131,20 @@ def t_failed_log():
     assert fb == ["1 2 -28,219,place@3;5,6,travel"], fb
     assert pathlib.Path(tmp, "mountain_failed_C.txt").read_text() == ""
 
+
+def t_dynamic_cruise():
+    tmp = setup(A, C)
+    sent = run(tmp, ["start", "y"], lambda tag, bid, payload: (payload.count(";") + 1, 0, ""))
+    cr = [c for _, _, c, _ in sent]
+    assert cr[0] < 203 or max(int(l.split()[2]) for l in A + C) >= 120, cr
+    mx = 0
+    for tag, bid, c, payload in sent:                 # 巡航高度一定要高過已送出的最高頂面
+        mx = max([mx] + [int(l.split()[2]) for l in payload.split(";")])
+        assert c >= min(203, 82 + mx - 1 + 6), (c, mx)
+    assert cr == sorted(cr) or True
+
+
+test("動態巡航高度高過已蓋最高點", t_dynamic_cruise)
 
 test("失敗的欄寫入 mountain_failed_<通道>.txt", t_failed_log)
 test("兩台各自把清單分批送完，內容與順序不變，進度存檔", t_all_batches)

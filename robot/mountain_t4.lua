@@ -12,7 +12,11 @@ modem.open(SERVER_PORT)
 -- ────────── 設定 ──────────
 local TAGS = { "B", "C" }          -- 要出動的通道 (中繼 server.lua 的 TUNNEL_POOL 要有)
 local BATCH = 40                   -- 每批欄數：每批 ≈ 1 KB，遠低於封包上限 8192
-local CRUISE = 203                 -- 巡航高度 (山最高頂面 + 3)；mountain.py 會印出「無人機巡航高度至少 Y=」
+local CRUISE = 203                 -- 巡航高度上限 (山最高頂面 + 3)；mountain.py 會印出「無人機巡航高度至少 Y=」
+local MIN_CRUISE = 110                -- 巡航高度下限：湖和其他既有建築的高度；動態巡航不會低於這個
+local MARGIN = 6                      -- 巡航比「已蓋最高頂面」/ 既有地形再高幾格
+local SCAN_FILE = "scan.txt"          -- 掃描檔 (每行 bx bz top)；有的話，既有地形 (樹、山) 高過已蓋的部分也會避開
+local BASE_TOP = 82                   -- 第 1 層方塊頂面的 Y；h 層的頂面 = BASE_TOP + h - 1
 local PROGRESS = "mountain_progress.txt"
 local function failfile(tag) return "mountain_failed_" .. tag .. ".txt" end   -- 失敗紀錄：每批一行「批次id 失敗數 x,z,原因;...」
 local WARN_SECONDS = 900           -- 超過這麼久沒收到回報就提醒 (掃一批要幾分鐘；沒電的話無人機會自己等充電)
@@ -73,6 +77,70 @@ local function nextBatch(tag, off)
   return table.concat(lines, ";"), n, new_off
 end
 
+-- 動態巡航高度：整座山是由低到高蓋的，早期已蓋的最高點很低，不必每次都升到 203。
+-- 每批的巡航 = max(下限, 已蓋 / 本批最高頂面 + 邊界, 本批飛行範圍內既有地形最高點 + 邊界)，不超過上限。
+local scanGrid = {}
+local CELL = 16
+local function loadScan()
+  local f = io.open(SCAN_FILE, "r")
+  if not f then return 0 end
+  local n = 0
+  for line in f:lines() do
+    local x, z, top = line:match("^(-?%d+) (-?%d+) (-?%d+)")
+    if x then
+      local k = math.floor(tonumber(x) / CELL) .. "," .. math.floor(tonumber(z) / CELL)
+      if (scanGrid[k] or -1) < tonumber(top) then scanGrid[k] = tonumber(top) end
+      n = n + 1
+    end
+  end
+  f:close()
+  return n
+end
+
+local function scanMax(x0, x1, z0, z1)
+  local m = 0
+  for cx = math.floor((x0 - 8) / CELL), math.floor((x1 + 8) / CELL) do
+    for cz = math.floor((z0 - 8) / CELL), math.floor((z1 + 8) / CELL) do
+      local t = scanGrid[cx .. "," .. cz]
+      if t and t > m then m = t end
+    end
+  end
+  return m
+end
+
+loadScan()
+local builtMax = {}                    -- 每個通道目前送出的最高 h
+local lastCol = {}                     -- 每個通道上一批最後一欄的世界方塊座標
+
+local function cruiseFor(tag, payload)
+  local x0, x1, z0, z1 = math.huge, -math.huge, math.huge, -math.huge
+  local function add(bx, bz)
+    if bx < x0 then x0 = bx end
+    if bx > x1 then x1 = bx end
+    if bz < z0 then z0 = bz end
+    if bz > z1 then z1 = bz end
+  end
+  local hmax = builtMax[tag] or 0
+  local last
+  for x, z, h in payload:gmatch("(-?%d+) (-?%d+) (%d+) %S+") do
+    local bx, bz = math.floor(-200.5 + tonumber(x)), math.floor(-49.5 - tonumber(z))
+    add(bx, bz)
+    last = { bx, bz }
+    if tonumber(h) > hmax then hmax = tonumber(h) end
+  end
+  builtMax[tag] = hmax
+  if lastCol[tag] then add(lastCol[tag][1], lastCol[tag][2]) end
+  lastCol[tag] = last
+  local built = 0
+  for _, t in ipairs(TAGS) do if (builtMax[t] or 0) > built then built = builtMax[t] end end
+  local c = BASE_TOP + built - 1 + MARGIN
+  if x0 <= x1 then
+    local sm = scanMax(x0, x1, z0, z1)
+    if sm > 0 and sm + MARGIN > c then c = sm + MARGIN end
+  end
+  return math.min(CRUISE, math.max(MIN_CRUISE, c))
+end
+
 print("=======================================================")
 print("  T4 山體施工控制中心 (多無人機、整批回報)")
 print("=======================================================")
@@ -105,7 +173,7 @@ local function send(tag)
   local id = progress[tag].done + 1
   inflight[tag] = { id = id, n = n, off = new_off, t = os.time() }
   silent_since[tag] = os.clock()
-  modem.broadcast(SERVER_PORT, "SERVER_CMD", tag, "build_batch", id, CRUISE, payload)
+  modem.broadcast(SERVER_PORT, "SERVER_CMD", tag, "build_batch", id, cruiseFor(tag, payload), payload)
 end
 
 local function run()
