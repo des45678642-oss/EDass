@@ -20,7 +20,9 @@ CODE = ns["minified"]((ROOT / "robot" / "mountain_task.lua").read_text(encoding=
 sys.path.insert(0, str(ROOT / "mountain"))
 import mountain as M  # noqa: E402
 
-ENTRY = dict(S=1, T=2, C=3, N=4, G=5, D=6)
+ITEM_NAME = dict(S="minecraft:stone", T="minecraft:stained_hardened_clay", C="minecraft:cobblestone",
+                 N="minecraft:snow", G="minecraft:gravel", D="minecraft:dirt")
+ENTRY = dict(ITEM_NAME)            # 預期方塊以材料名稱記錄 (資料庫項目編號由程式自己決定)
 
 
 class MSim(Sim):
@@ -32,7 +34,10 @@ class MSim(Sim):
         self.sel = 1
         self.blocks = {}                  # (x, y, z) -> 材質編號
         self.me_requests = 0
-        self.supply = supply              # None = 無限；否則 {材質編號: 剩餘數量}
+        self.supply = supply              # None = 無限；否則 {材料名稱: 剩餘數量}
+        self.netitems = set(ITEM_NAME.values())   # ME 網路裡有的材料
+        self.dbslots = {}                 # 資料庫項目 -> 材料名稱
+        self.store_calls = 0
         self.place_fail = 0
 
     def mplace(self):
@@ -62,18 +67,26 @@ class MSim(Sim):
             sim.sel = int(s)
             return int(s)
 
+        def store(flt, addr, entry, count=1):
+            sim.store_calls += 1
+            name = flt["name"]
+            if name not in sim.netitems:
+                return False
+            sim.dbslots[int(entry)] = name
+            return True
+
         def request(addr, entry, amount):
             s = sim.slots[sim.sel]
-            entry = int(entry)
-            if s[1] > 0 and s[0] != entry:
+            item = sim.dbslots.get(int(entry))
+            if item is None or (s[1] > 0 and s[0] != item):
                 return 0
-            have = sim.supply.get(entry, 0) if sim.supply is not None else 10 ** 9
+            have = sim.supply.get(item, 0) if sim.supply is not None else 10 ** 9
             n = min(int(amount), 64 - s[1], have)
             if n <= 0:
                 return 0
             if sim.supply is not None:
-                sim.supply[entry] -= n
-            s[0] = entry
+                sim.supply[item] -= n
+            s[0] = item
             s[1] += n
             sim.me_requests += 1
             return n
@@ -93,14 +106,17 @@ class MSim(Sim):
             }),
             "navigation": lua.table_from({"getPosition": lambda: tuple(sim.p), "getRange": lambda: 1e9}),
             "tunnel": lua.table_from({"send": lambda *a: sim.send(a)}),
-            "upgrade_me": lua.table_from({"requestItems": request, "sendItems": send_items}),
-            "database": lua.table_from({"address": "db"}),
+            "upgrade_me": lua.table_from({"requestItems": request, "sendItems": send_items, "store": store}),
+            "database": lua.table_from({"address": "db", "clear": lambda e: sim.dbslots.pop(int(e), None) and None,
+                                        "get": lambda e: (lua.table_from({"name": sim.dbslots[int(e)]}) if int(e) in sim.dbslots else None)}),
             "camera": lua.table_from({
                 "distance": lambda x=0, y=0: sim.ray((-x, y, 1)),
                 "distanceUp": lambda x=0, y=0: sim.ray((x, 1, y)),
                 "distanceDown": lambda x=0, y=0: sim.ray((x, -1, y)),
             }),
         }
+        if not self.camera:
+            comps.pop("camera")
         g.component = lua.table_from({"list": lambda kind: (lambda *a: kind) if kind in comps else (lambda *a: None),
                                       "proxy": lambda addr: comps.get(addr)})
         self.queue = []
@@ -228,7 +244,7 @@ def t_me_on_demand():
 
 def t_me_empty():
     lines, expect, h = small_mountain()
-    sim = make_sim(supply={1: 5})                                      # 石頭只有 5 個，其他材料沒有
+    sim = make_sim(supply={ITEM_NAME["S"]: 5})                         # 石頭只有 5 個，其他材料沒有
     sim.run([";".join(lines)], cruise=int(81 + h.max() + 4))
     kinds = [r[2] for r in sim.reports]
     assert "ERROR" in kinds and "BATCH_DONE" not in kinds, kinds
@@ -261,10 +277,39 @@ def t_basin_needs_plan():
     assert failed == 0 and sim.place_fail == 0 and sim.blocks == expect, (failed, sim.place_fail)
 
 
+def t_db_auto_setup():
+    lines, expect, h = small_mountain()
+    sim = make_sim()
+    sim.run([";".join(lines)], cruise=int(81 + h.max() + 4))
+    used = set(expect.values())
+    assert sim.store_calls == len(used), (sim.store_calls, used)      # 每種用到的材料只寫一次資料庫
+    assert sim.blocks == expect
+
+
+def t_missing_material():
+    lines, expect, h = small_mountain()
+    sim = make_sim()
+    sim.netitems.discard(ITEM_NAME["C"])                               # ME 裡沒有鵝卵石
+    sim.run([";".join(lines)], cruise=int(81 + h.max() + 4))
+    err = [r for r in sim.reports if r[2] == "ERROR"]
+    assert err and "cobblestone" in str(err[0][3]), sim.reports
+
+
+def t_no_camera():
+    lines, expect, h = small_mountain()
+    sim = make_sim(camera=False)                                       # 沒裝攝影機：靠卡住偵測，照樣蓋得出來
+    sim.run([";".join(lines[i:i + 20]) for i in range(0, len(lines), 20)], cruise=int(81 + h.max() + 4))
+    done, failed, _ = done_counts(sim)
+    assert failed == 0 and sim.blocks == expect, (done, failed, len(sim.blocks), len(expect))
+
+
 test("蓋出來的方塊和清單完全一致、每塊都符合放置規則", t_build_matches_plan)
 test("ME 按需請求：每種材料請求過、有快取不是每塊都請求", t_me_on_demand)
 test("ME 供不出材料：回報 ERROR 並中止，不假裝完成", t_me_empty)
 test("無法抵達的欄：記錄失敗，其餘繼續", t_blocked_column)
 test("盆地高原：亂序放不上去，規劃過的順序全部放得上去", t_basin_needs_plan)
+test("資料庫由程式自己寫入：每種材料只寫一次", t_db_auto_setup)
+test("ME 網路沒有某材料：回報 ERROR 並指出材料名稱", t_missing_material)
+test("沒裝攝影機：照樣蓋得出來", t_no_camera)
 print(f"\n{sum(results)} passed, {len(results) - sum(results)} failed")
 sys.exit(0 if all(results) else 1)

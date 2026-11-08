@@ -2,8 +2,10 @@
 -- 每欄是一段垂直的殼 (start..h 層)，由下往上蓋：無人機停在目標格正上方，用 place(0) 往腳下放，
 -- 放完往上升一格再放。OC 放置規則：目標格的腳下或四個側邊有方塊就放得上去 (產生器已保證順序可行)。
 --
--- 材料：背包只有 4 格，用 ME 升級按需請求。資料庫 (database) 的項目編號要照下面 ENTRY 設定：
---   1=石頭 2=灰色陶瓦 3=鵝卵石 4=雪 5=砂礫 6=泥土
+-- 材料：背包只有 4 格，用 ME 升級按需請求。資料庫 (database) 不用手動設定：第一次用到某種材料時，
+--   程式會用 ME 的 store 把該材料寫進資料庫的對應項目 (編號見 ENTRY)，再用 requestItems 請求。
+--   材料的名稱與損傷值在下面的 ITEM 表，不是這些方塊 (例如其他模組的石頭) 就改這張表。
+--   ME 網路裡必須有這些材料。
 -- 座標：欄位用湖地圖座標 (x_map, z_map)，世界 X = -200.5 + x_map，世界 Z = -49.5 - z_map，
 --       層 k 的方塊 Y = 81 + k，放它時無人機的 Y = 82 + k。
 -- 指令格式 (T4 -> 中繼 -> 無人機)：build_batch, 批次編號, 巡航高度, "x z h 材質串;x z h 材質串;..."
@@ -17,7 +19,15 @@ local db = component.proxy(component.list("database")() or "")
 local ca = component.list("camera")()
 local cam = ca and component.proxy(ca)
 
-local ENTRY = { S = 1, T = 2, C = 3, N = 4, G = 5, D = 6 }
+local ENTRY = { S = 1, T = 2, C = 3, N = 4, G = 5, D = 6 }   -- 各材料用的資料庫項目編號
+local ITEM = {                                                   -- 各材料的 ME 過濾條件 (1.7.10 名稱)
+  S = { name = "minecraft:stone", damage = 0 },                 -- 石頭
+  T = { name = "minecraft:stained_hardened_clay", damage = 7 },  -- 灰色陶瓦
+  C = { name = "minecraft:cobblestone", damage = 0 },           -- 鵝卵石
+  N = { name = "minecraft:snow", damage = 0 },                  -- 雪 (方塊)
+  G = { name = "minecraft:gravel", damage = 0 },                -- 砂礫
+  D = { name = "minecraft:dirt", damage = 0 },                  -- 泥土
+}
 local WX0, WZ0, BASE = -200.5, -49.5, 82
 local MAXUP, LEG = 12, 30
 local HOP = 6                  -- 水平距離不超過這個就低空平移，超過就升到巡航高度
@@ -102,6 +112,16 @@ local function fly(tx, tz)
   end
 end
 
+-- 確保資料庫項目 ENTRY[m] 是材料 m：這次開機第一次用到時，用 ME 的 store 重寫一次
+local ready = {}
+local function setup_entry(m)
+  if ready[m] then return end
+  db.clear(ENTRY[m])
+  me.store(ITEM[m], db.address, ENTRY[m], 1)
+  if not db.get(ENTRY[m]) then error("ME 網路裡找不到 " .. ITEM[m].name .. " (損傷值 " .. ITEM[m].damage .. ")") end
+  ready[m] = true
+end
+
 -- 背包 4 格當快取：要的材料不在就向 ME 請求，沒有空槽就把最久沒用的還給 ME
 local slot_m, slot_t, clock = {}, {}, 0
 local function stock(m)
@@ -117,6 +137,7 @@ local function stock(m)
   d.select(pick)
   if d.count(pick) > 0 then me.sendItems() end
   if d.count(pick) > 0 then error("ME 收不回槽 " .. pick .. " 的舊材料 (ME 滿了？)") end
+  setup_entry(m)
   local got = me.requestItems(db.address, ENTRY[m], 64)
   if not got or got < 1 or d.count(pick) < 1 then error("ME 供不出材料 " .. m .. " (資料庫項目 " .. ENTRY[m] .. ")") end
   slot_m[pick], slot_t[pick] = m, clock
